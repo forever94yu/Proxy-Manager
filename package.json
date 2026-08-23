@@ -1,0 +1,19 @@
+{
+  "name": "proxy-manager",
+  "version": "1.0.0",
+  "private": true,
+  "description": "3proxy multi-server control plane and Vue 3 console",
+  "scripts": {
+    "setup": "npm --prefix web install && go -C server mod download",
+    "dev": "node scripts/dev.mjs",
+    "dev:api": "go -C server run .",
+    "dev:web": "npm --prefix web run dev",
+    "build": "npm run build:web && npm run build:server",
+    "build:web": "npm --prefix web run build",
+    "build:server": "node scripts/build-server.mjs",
+    "test": "npm --prefix web run typecheck && npm --prefix web run build && go -C server test ./..."
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

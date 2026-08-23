@@ -1,0 +1,43 @@
+on: [push, pull_request]
+
+name: Lint
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        uses: ludeeus/action-shellcheck@master
+        env:
+          SHELLCHECK_OPTS: -e SC1091,SC1117,SC2001,SC2034
+
+  shfmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mfinelli/setup-shfmt@v3
+      - run: find . -type f -name '*.sh' -not -path './web/node_modules/*' -print0 | xargs -0 shfmt -d
+
+  control-plane:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache-dependency-path: server/go.sum
+      - run: npm ci --prefix web
+      - run: npm test
+
+  installer-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: find tests/docker -type f -name '*.sh' -exec chmod +x {} + && chmod +x 3proxy-install.sh
+      - run: ./tests/docker/run.sh --dist ubuntu-24.04

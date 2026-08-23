@@ -1,0 +1,14 @@
+services:
+  proxy-manager:
+    build: .
+    image: proxy-manager:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - proxy-manager-data:/data
+
+volumes:
+  proxy-manager-data:

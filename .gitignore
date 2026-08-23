@@ -1,0 +1,12 @@
+tests/test-results.log
+tests/docker/logs/
+.env
+.env.local
+data/
+dist/
+node_modules/
+server/data/
+server/proxy-manager.exe
+web/node_modules/
+web/dist/
+*.log

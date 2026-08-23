@@ -1,0 +1,11 @@
+.git
+.github
+.env
+data
+dist
+server/data
+server/proxy-manager.exe
+web/node_modules
+web/dist
+tests/docker/logs
+*.log
