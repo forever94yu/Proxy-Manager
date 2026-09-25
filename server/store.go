@@ -68,7 +68,12 @@ func OpenStore(path string) (*Store, error) {
 			return nil, fmt.Errorf("create database directory: %w", err)
 		}
 	}
-	dsn := "file:" + filepath.ToSlash(path) + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	// _txlock=immediate makes every BeginTx issue BEGIN IMMEDIATE. The store's
+	// transactions read before they write; with the default deferred mode two
+	// concurrent writers (e.g. several worker loops in ClaimTarget) can fail
+	// the read->write lock upgrade with SQLITE_BUSY, which busy_timeout does
+	// not retry. Taking the write lock up front lets busy_timeout serialize them.
+	dsn := "file:" + filepath.ToSlash(path) + "?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
 	if path != ":memory:" {
 		dsn += "&_pragma=journal_mode(WAL)"
 	}

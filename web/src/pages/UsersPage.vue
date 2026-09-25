@@ -13,6 +13,7 @@ import {
 } from 'lucide-vue-next'
 
 import { serversApi, usersApi } from '@/api'
+import { ApiError } from '@/api/client'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import SecretRevealDialog from '@/components/SecretRevealDialog.vue'
@@ -34,6 +35,7 @@ const syncStatus = ref('')
 const formOpen = ref(false)
 const editingUser = ref<ProxyUser | null>(null)
 const formSubmitting = ref(false)
+const formFieldErrors = ref<Record<string, string> | undefined>()
 const deleteTarget = ref<ProxyUser | null>(null)
 const deleting = ref(false)
 const secretRecord = ref<{ username: string; password: string } | null>(null)
@@ -88,6 +90,7 @@ function openEdit(user: ProxyUser): void {
 
 async function submitUser(input: ProxyUserInput): Promise<void> {
   formSubmitting.value = true
+  formFieldErrors.value = undefined
   try {
     const result = editingUser.value
       ? await usersApi.update(editingUser.value.id, input)
@@ -100,6 +103,7 @@ async function submitUser(input: ProxyUserInput): Promise<void> {
     }
     await load(true)
   } catch (caught) {
+    if (caught instanceof ApiError && caught.fields) formFieldErrors.value = caught.fields
     toast.notify('error', '保存失败', caught instanceof Error ? caught.message : '请检查输入后重试')
   } finally {
     formSubmitting.value = false
@@ -207,7 +211,7 @@ onBeforeUnmount(() => {
       </EmptyState>
     </section>
 
-    <UserFormDialog :open="formOpen" :user="editingUser" :servers="servers" :submitting="formSubmitting" @close="formOpen = false" @submit="submitUser" />
+    <UserFormDialog :open="formOpen" :user="editingUser" :servers="servers" :submitting="formSubmitting" :field-errors="formFieldErrors" @close="formOpen = false" @submit="submitUser" />
     <SecretRevealDialog
       :open="Boolean(secretRecord)"
       :username="secretRecord?.username || ''"

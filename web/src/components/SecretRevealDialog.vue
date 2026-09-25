@@ -34,8 +34,8 @@ async function copyPassword(): Promise<void> {
 <template>
   <ModalDialog :open="open" title="保存代理密码" description="密码只会显示这一次，关闭后无法再次查看。" size="small" @close="$emit('close')">
     <div class="secret-notice">
-      <ShieldCheck :size="20" />
-      <p>账号 <strong>{{ username }}</strong> 已创建，同步任务正在后台执行。</p>
+      <ShieldCheck :size="20" aria-hidden="true" />
+      <p>账号 <strong>{{ username }}</strong> 的新密码已生成，同步任务正在后台执行。</p>
     </div>
     <label class="field">
       <span>生成的密码</span>

@@ -2,7 +2,6 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import {
-  Activity,
   LayoutDashboard,
   ListChecks,
   LogOut,
@@ -23,6 +22,7 @@ const auth = useAuthStore()
 const toast = useToastStore()
 const mobileOpen = ref(false)
 const loggingOut = ref(false)
+const scrolled = ref(false)
 
 const navItems = [
   { to: '/dashboard', label: '运行概览', icon: LayoutDashboard },
@@ -40,6 +40,12 @@ function handleKeydown(event: KeyboardEvent): void {
   if (event.key === 'Escape') mobileOpen.value = false
 }
 
+// The page's large title scrolls away; once it has, the compact title fades
+// into the translucent top bar (the large-title pattern from Apple's apps).
+function handleScroll(): void {
+  scrolled.value = window.scrollY > 44
+}
+
 async function logout(): Promise<void> {
   loggingOut.value = true
   try {
@@ -52,8 +58,15 @@ async function logout(): Promise<void> {
   }
 }
 
-onMounted(() => window.addEventListener('keydown', handleKeydown))
-onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown))
+onMounted(() => {
+  window.addEventListener('keydown', handleKeydown)
+  window.addEventListener('scroll', handleScroll, { passive: true })
+  handleScroll()
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleKeydown)
+  window.removeEventListener('scroll', handleScroll)
+})
 </script>
 
 <template>
@@ -64,16 +77,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown))
 
     <aside class="sidebar" :class="{ open: mobileOpen }">
       <div class="brand-row">
-        <span class="brand-mark"><Network :size="21" /></span>
-        <div class="brand-copy">
-          <strong>Proxy Manager</strong>
-          <span>3proxy 控制台</span>
-        </div>
-        <button class="sidebar-close" type="button" aria-label="关闭导航" @click="mobileOpen = false"><X :size="19" /></button>
+        <span class="app-icon small"><Network :size="17" /></span>
+        <strong class="brand-name">Proxy Manager</strong>
+        <button class="icon-button sidebar-close" type="button" aria-label="关闭导航" @click="mobileOpen = false"><X :size="18" /></button>
       </div>
 
       <nav class="main-nav" aria-label="主导航">
-        <span class="nav-label">工作台</span>
         <RouterLink v-for="item in navItems" :key="item.to" :to="item.to" class="nav-item">
           <component :is="item.icon" :size="18" />
           <span>{{ item.label }}</span>
@@ -81,16 +90,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown))
       </nav>
 
       <div class="sidebar-footer">
-        <div class="control-health">
-          <span class="health-icon"><Activity :size="16" /></span>
-          <div>
-            <strong>管理服务正常</strong>
-            <span>API 已连接</span>
-          </div>
-          <span class="health-dot" aria-label="在线" />
-        </div>
         <div class="operator-block">
-          <span class="operator-avatar">{{ operatorInitials(auth.operator?.name || '') }}</span>
+          <span class="operator-avatar" aria-hidden="true">{{ operatorInitials(auth.operator?.name || '') }}</span>
           <div class="operator-copy">
             <strong>{{ auth.operator?.name || auth.operator?.username }}</strong>
             <span>{{ roleLabel }}</span>
@@ -103,18 +104,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown))
     </aside>
 
     <div class="workspace">
-      <header class="topbar">
-        <div class="topbar-leading">
-          <button class="mobile-menu-button" type="button" aria-label="打开导航" @click="mobileOpen = true"><Menu :size="20" /></button>
-          <div>
-            <span class="topbar-context">Proxy Manager</span>
-            <h1>{{ pageTitle }}</h1>
-          </div>
-        </div>
-        <div class="topbar-status">
-          <span class="health-dot" />
-          控制面在线
-        </div>
+      <header class="topbar" :class="{ scrolled }">
+        <button class="icon-button mobile-menu-button" type="button" aria-label="打开导航" @click="mobileOpen = true"><Menu :size="20" /></button>
+        <h1 class="topbar-title">{{ pageTitle }}</h1>
       </header>
 
       <main class="page-content">

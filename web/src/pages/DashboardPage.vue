@@ -1,16 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
-import {
-  AlertCircle,
-  CircleAlert,
-  Clock3,
-  PlayCircle,
-  RefreshCw,
-  Server as ServerIcon,
-  UsersRound,
-  Wifi,
-} from 'lucide-vue-next'
+import { AlertCircle, ChevronRight, RefreshCw } from 'lucide-vue-next'
 
 import { dashboardApi } from '@/api'
 import EmptyState from '@/components/EmptyState.vue'
@@ -26,13 +17,32 @@ const refreshing = ref(false)
 const error = ref('')
 let refreshTimer: number | undefined
 
-const stats = computed(() => [
-  { label: '服务器总数', value: data.value?.stats.totalServers ?? '—', meta: '已登记节点', icon: ServerIcon, tone: 'neutral' },
-  { label: '在线节点', value: data.value?.stats.onlineServers ?? '—', meta: data.value ? `${Math.round((data.value.stats.onlineServers / Math.max(1, data.value.stats.totalServers)) * 100)}% 可连接` : '连通性', icon: Wifi, tone: 'success' },
-  { label: '运行服务', value: data.value?.stats.runningServices ?? '—', meta: '3proxy active', icon: PlayCircle, tone: 'info' },
-  { label: '代理用户', value: data.value?.stats.totalUsers ?? '—', meta: '中央账号', icon: UsersRound, tone: 'violet' },
-  { label: '失败任务', value: data.value?.stats.failedJobs ?? '—', meta: '需要处理', icon: CircleAlert, tone: data.value?.stats.failedJobs ? 'danger' : 'neutral' },
-])
+// Two concentric rings: outer = servers reachable, inner = 3proxy running.
+const RING_OUTER = 64
+const RING_INNER = 46
+const circumference = (radius: number) => 2 * Math.PI * radius
+
+function ratio(part?: number, total?: number): number {
+  if (!total) return 0
+  return Math.max(0, Math.min(1, (part ?? 0) / total))
+}
+
+const stats = computed(() => data.value?.stats)
+const onlineRatio = computed(() => ratio(stats.value?.onlineServers, stats.value?.totalServers))
+const runningRatio = computed(() => ratio(stats.value?.runningServices, stats.value?.totalServers))
+const healthHeadline = computed(() => {
+  if (!stats.value) return '正在读取节点状态'
+  if (!stats.value.totalServers) return '还没有登记服务器'
+  const offline = stats.value.totalServers - stats.value.onlineServers
+  if (offline === 0 && stats.value.runningServices === stats.value.totalServers) return '所有节点运行正常'
+  if (offline > 0) return `${offline} 台服务器无法连接`
+  return `${stats.value.totalServers - stats.value.runningServices} 台服务器的代理服务未运行`
+})
+
+function dash(radius: number, value: number): string {
+  const length = circumference(radius)
+  return `${length * value} ${length}`
+}
 
 const jobLabels: Record<string, string> = {
   deploy: '部署服务',
@@ -73,7 +83,7 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer))
         <h2>运行概览</h2>
       </div>
       <button class="button secondary compact" type="button" :disabled="refreshing" @click="load(true)">
-        <RefreshCw :size="16" :class="{ spinning: refreshing }" />
+        <RefreshCw :size="15" :class="{ spinning: refreshing }" />
         刷新
       </button>
     </header>
@@ -84,22 +94,51 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer))
       <button class="button secondary compact" type="button" @click="load()">重试</button>
     </div>
 
-    <section class="metric-grid" aria-label="运行指标">
-      <article v-for="stat in stats" :key="stat.label" class="metric-item">
-        <span class="metric-icon" :class="`metric-${stat.tone}`"><component :is="stat.icon" :size="19" /></span>
-        <div class="metric-copy">
-          <span>{{ stat.label }}</span>
-          <strong>{{ stat.value }}</strong>
-          <small>{{ stat.meta }}</small>
+    <section class="health-hero" aria-label="节点健康">
+      <div class="health-rings" :class="{ ready: Boolean(stats) }">
+        <svg viewBox="0 0 160 160" role="img" :aria-label="`在线 ${stats?.onlineServers ?? 0} 台，服务运行 ${stats?.runningServices ?? 0} 台，共 ${stats?.totalServers ?? 0} 台`">
+          <circle class="ring-track ring-online" cx="80" cy="80" :r="RING_OUTER" />
+          <circle class="ring-value ring-online" cx="80" cy="80" :r="RING_OUTER" :stroke-dasharray="dash(RING_OUTER, stats ? onlineRatio : 0)" />
+          <circle class="ring-track ring-running" cx="80" cy="80" :r="RING_INNER" />
+          <circle class="ring-value ring-running" cx="80" cy="80" :r="RING_INNER" :stroke-dasharray="dash(RING_INNER, stats ? runningRatio : 0)" />
+        </svg>
+        <div class="ring-center">
+          <strong>{{ stats?.totalServers ?? '—' }}</strong>
+          <span>台服务器</span>
         </div>
-      </article>
+      </div>
+
+      <div class="health-copy">
+        <h3>{{ healthHeadline }}</h3>
+        <dl class="health-legend">
+          <div class="legend-online">
+            <dt>在线节点</dt>
+            <dd><strong>{{ stats?.onlineServers ?? '—' }}</strong><span>/ {{ stats?.totalServers ?? '—' }}</span></dd>
+          </div>
+          <div class="legend-running">
+            <dt>服务运行</dt>
+            <dd><strong>{{ stats?.runningServices ?? '—' }}</strong><span>/ {{ stats?.totalServers ?? '—' }}</span></dd>
+          </div>
+          <div>
+            <dt>代理用户</dt>
+            <dd><strong>{{ stats?.totalUsers ?? '—' }}</strong></dd>
+          </div>
+          <div :class="{ 'legend-alert': Boolean(stats?.failedJobs) }">
+            <dt>失败任务</dt>
+            <dd>
+              <strong>{{ stats?.failedJobs ?? '—' }}</strong>
+              <RouterLink v-if="stats?.failedJobs" class="text-link" to="/jobs">去处理</RouterLink>
+            </dd>
+          </div>
+        </dl>
+      </div>
     </section>
 
     <div class="dashboard-grid">
       <section class="surface-panel server-health-panel">
         <header class="panel-heading">
-          <div><h3>节点健康</h3><p>最近上报的连接与服务状态</p></div>
-          <RouterLink class="text-link" to="/servers">查看全部</RouterLink>
+          <h3>节点</h3>
+          <RouterLink class="text-link" to="/servers">全部服务器<ChevronRight :size="15" /></RouterLink>
         </header>
         <TableSkeleton v-if="loading" :rows="5" />
         <div v-else-if="data?.servers.length" class="table-scroll">
@@ -112,21 +151,21 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer))
                 </td>
                 <td><StatusBadge :status="server.status" compact /></td>
                 <td><StatusBadge :status="server.serviceStatus" compact /></td>
-                <td>{{ server.userCount ?? '—' }}</td>
-                <td><span :title="formatDateTime(server.lastSeenAt)">{{ formatRelativeTime(server.lastSeenAt) }}</span></td>
+                <td class="numeric">{{ server.userCount ?? '—' }}</td>
+                <td class="muted-cell"><span :title="formatDateTime(server.lastSeenAt)">{{ formatRelativeTime(server.lastSeenAt) }}</span></td>
               </tr>
             </tbody>
           </table>
         </div>
-        <EmptyState v-else title="尚未登记服务器" description="添加服务器后，节点状态会显示在这里。">
+        <EmptyState v-else title="还没有服务器" description="添加服务器后，这里会显示每台节点的连接和服务状态。">
           <RouterLink class="button primary compact" to="/servers">添加服务器</RouterLink>
         </EmptyState>
       </section>
 
       <section class="surface-panel recent-jobs-panel">
         <header class="panel-heading">
-          <div><h3>近期任务</h3><p>部署与配置变更记录</p></div>
-          <RouterLink class="text-link" to="/jobs">查看全部</RouterLink>
+          <h3>近期任务</h3>
+          <RouterLink class="text-link" to="/jobs">全部任务<ChevronRight :size="15" /></RouterLink>
         </header>
         <div v-if="loading" class="job-list-loading">
           <div v-for="row in 5" :key="row" class="job-skeleton"><span /><span /></div>
@@ -137,14 +176,17 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer))
               <div class="job-title"><strong>{{ jobLabels[job.type] || job.type }}</strong><span class="mono">#{{ compactId(job.id) }}</span></div>
               <StatusBadge :status="job.status" compact />
             </div>
-            <div class="job-progress-line">
-              <ProgressBar :value="job.progress" :tone="job.status === 'failed' ? 'danger' : job.status === 'partially_failed' ? 'warning' : 'default'" />
-              <span>{{ job.progress ?? 0 }}%</span>
+            <ProgressBar
+              v-if="job.status === 'running' || job.status === 'queued'"
+              :value="job.progress"
+            />
+            <div class="job-row-meta">
+              <span>{{ formatJobMessage(job.message, job.successCount, job.targetCount) }}</span>
+              <span>{{ formatRelativeTime(job.createdAt) }}</span>
             </div>
-            <div class="job-row-meta"><span><Clock3 :size="13" />{{ formatRelativeTime(job.createdAt) }}</span><span>{{ formatJobMessage(job.message, job.successCount, job.targetCount) }}</span></div>
           </article>
         </div>
-        <EmptyState v-else title="暂无任务记录" description="部署或配置变更后，任务会显示在这里。" />
+        <EmptyState v-else title="暂无任务" description="部署服务器或修改代理用户后，任务会显示在这里。" />
       </section>
     </div>
   </div>

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -593,5 +594,46 @@ func decodeBody(t *testing.T, body string, destination any) {
 	t.Helper()
 	if err := json.Unmarshal([]byte(body), destination); err != nil {
 		t.Fatalf("decode response %q: %v", body, err)
+	}
+}
+
+func TestStaticHandlerFallsBackOnlyForClientRoutes(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "index.html"), []byte("<!doctype html><div id=app></div>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(directory, "assets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "assets", "app.js"), []byte("console.log(1)"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handler := staticHandler(directory)
+	if handler == nil {
+		t.Fatal("staticHandler returned nil for a directory with index.html")
+	}
+	cases := []struct {
+		path        string
+		status      int
+		contentType string
+	}{
+		{"/", http.StatusOK, "text/html"},
+		{"/servers", http.StatusOK, "text/html"},
+		{"/users/abc", http.StatusOK, "text/html"},
+		{"/assets/app.js", http.StatusOK, "javascript"},
+		{"/assets/missing-chunk.js", http.StatusNotFound, "application/json"},
+		{"/assets/unknown", http.StatusNotFound, "application/json"},
+		{"/favicon.ico", http.StatusNotFound, "application/json"},
+		{"/robots.txt", http.StatusNotFound, "application/json"},
+	}
+	for _, tc := range cases {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		if recorder.Code != tc.status {
+			t.Errorf("GET %s status = %d, want %d", tc.path, recorder.Code, tc.status)
+		}
+		if got := recorder.Header().Get("Content-Type"); !strings.Contains(got, tc.contentType) {
+			t.Errorf("GET %s Content-Type = %q, want %q", tc.path, got, tc.contentType)
+		}
 	}
 }

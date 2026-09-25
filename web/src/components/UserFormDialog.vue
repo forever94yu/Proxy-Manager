@@ -11,6 +11,8 @@ const props = defineProps<{
   user?: ProxyUser | null
   servers: Server[]
   submitting?: boolean
+  /** Field errors returned by the API (already translated). */
+  fieldErrors?: Record<string, string>
 }>()
 
 const emit = defineEmits<{
@@ -41,8 +43,20 @@ watch([() => props.open, () => props.user], ([open, user]) => {
   errors.value = {}
 }, { immediate: true })
 
+watch(() => props.fieldErrors, (fields) => {
+  if (!fields || !Object.keys(fields).length) return
+  const next = { ...fields }
+  if (next.passwordMode && !next.password) next.password = next.passwordMode
+  errors.value = next
+})
+
 function toggleAll(): void {
-  form.serverIds = allSelected.value ? [] : selectableServers.value.map((server) => server.id)
+  // Keep servers that are already bound but not currently selectable (e.g. an
+  // installation that is failed/in progress); otherwise "select all / clear"
+  // would silently remove the user from those servers on save.
+  const selectableIds = selectableServers.value.map((server) => server.id)
+  const locked = form.serverIds.filter((id) => !selectableIds.includes(id))
+  form.serverIds = allSelected.value ? locked : [...locked, ...selectableIds]
 }
 
 function validate(): boolean {

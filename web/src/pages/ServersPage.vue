@@ -15,6 +15,7 @@ import {
 } from 'lucide-vue-next'
 
 import { serversApi } from '@/api'
+import { ApiError } from '@/api/client'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ServerFormDialog from '@/components/ServerFormDialog.vue'
@@ -34,6 +35,7 @@ const status = ref('')
 const formOpen = ref(false)
 const editingServer = ref<Server | null>(null)
 const formSubmitting = ref(false)
+const formFieldErrors = ref<Record<string, string> | undefined>()
 const deleteTarget = ref<Server | null>(null)
 const deployTarget = ref<Server | null>(null)
 const stopTarget = ref<Server | null>(null)
@@ -139,6 +141,7 @@ function openEdit(server: Server): void {
 
 async function submitServer(input: ServerInput): Promise<void> {
   formSubmitting.value = true
+  formFieldErrors.value = undefined
   try {
     const result = editingServer.value
       ? await serversApi.update(editingServer.value.id, input)
@@ -147,6 +150,7 @@ async function submitServer(input: ServerInput): Promise<void> {
     formOpen.value = false
     await load(true)
   } catch (caught) {
+    if (caught instanceof ApiError && caught.fields) formFieldErrors.value = caught.fields
     toast.notify('error', '保存失败', caught instanceof Error ? caught.message : '请检查输入后重试')
   } finally {
     formSubmitting.value = false
@@ -389,7 +393,7 @@ onBeforeUnmount(() => {
       </EmptyState>
     </section>
 
-    <ServerFormDialog :open="formOpen" :server="editingServer" :submitting="formSubmitting" @close="formOpen = false" @submit="submitServer" />
+    <ServerFormDialog :open="formOpen" :server="editingServer" :submitting="formSubmitting" :field-errors="formFieldErrors" @close="formOpen = false" @submit="submitServer" />
 
     <ConfirmDialog
       :open="Boolean(bulkConfirmAction)"

@@ -719,7 +719,7 @@ func (a *API) retryJob(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		message := "Job not found"
 		if errors.Is(err, ErrConflict) {
-			message = "Only failed jobs can be retried"
+			message = "Job cannot be retried: it is not failed, or newer changes to the same servers or users supersede it"
 		}
 		a.storeError(w, r, err, message)
 		return
@@ -1032,6 +1032,14 @@ func staticHandler(directory string) http.Handler {
 			return
 		}
 		if info, err := os.Stat(candidate); err != nil || info.IsDir() {
+			// Only extensionless client routes fall back to the SPA shell. A
+			// missing asset (stale hashed chunk, favicon, robots.txt, …) must be
+			// a real 404; answering it with index.html makes the browser try to
+			// execute HTML as JavaScript and hides deployment mistakes.
+			if strings.HasPrefix(filepath.ToSlash(cleanPath), "assets/") || filepath.Ext(cleanPath) != "" {
+				writeError(w, http.StatusNotFound, "not_found", "Resource not found", nil)
+				return
+			}
 			http.ServeFile(w, r, indexPath)
 			return
 		}

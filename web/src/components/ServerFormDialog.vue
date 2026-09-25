@@ -9,6 +9,8 @@ const props = defineProps<{
   open: boolean
   server?: Server | null
   submitting?: boolean
+  /** Field errors returned by the API (already translated). */
+  fieldErrors?: Record<string, string>
 }>()
 
 const emit = defineEmits<{
@@ -64,6 +66,15 @@ watch([() => props.open, () => props.server], ([open, server]) => {
   errors.value = {}
 }, { immediate: true })
 
+// Server-side validation is stricter than the client checks (hostname
+// syntax, tag charset, key format); surface its verdict on the fields.
+watch(() => props.fieldErrors, (fields) => {
+  if (!fields || !Object.keys(fields).length) return
+  const next = { ...fields }
+  if (next.authMethod && !next.credential) next.credential = next.authMethod
+  errors.value = next
+})
+
 function validate(): boolean {
   const next: Record<string, string> = {}
   const dnsServers = form.dns.split(',').map((item) => item.trim()).filter(Boolean)
@@ -72,7 +83,7 @@ function validate(): boolean {
   if (form.name.trim().length > 64) next.name = '名称不能超过 64 个字符'
   if (!form.host.trim() || /\s/.test(form.host)) next.host = '请输入有效的主机名或 IP 地址'
   if (!Number.isInteger(Number(form.sshPort)) || form.sshPort < 1 || form.sshPort > 65535) next.sshPort = 'SSH 端口范围为 1–65535'
-  if (!/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(form.sshUser)) next.sshUser = '请输入有效的 SSH 用户名'
+  if (!/^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/.test(form.sshUser.trim())) next.sshUser = '请输入有效的 SSH 用户名'
   if (credentialRequired.value && !form.credential.trim()) {
     if (!isEditing.value) {
       next.credential = form.authMethod === 'key' ? '请粘贴 SSH 私钥' : '请输入 SSH 密码'
@@ -140,7 +151,8 @@ function setAuthMethod(method: AuthMethod): void {
           </label>
           <label class="field full-mobile">
             <span>标签 <em>可选</em></span>
-            <input v-model="form.tags" autocomplete="off" placeholder="生产, 华东" />
+            <input v-model="form.tags" :class="{ invalid: errors.tags }" autocomplete="off" placeholder="生产, 华东" />
+            <small v-if="errors.tags" class="field-error">{{ errors.tags }}</small>
           </label>
         </div>
       </section>

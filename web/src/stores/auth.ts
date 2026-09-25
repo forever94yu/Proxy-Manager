@@ -34,6 +34,11 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
+  function clearSession(): void {
+    operator.value = null
+    initialized.value = true
+  }
+
   return {
     operator,
     initialized,
@@ -41,5 +46,6 @@ export const useAuthStore = defineStore('auth', () => {
     bootstrap,
     login,
     logout,
+    clearSession,
   }
 })
