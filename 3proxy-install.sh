@@ -426,7 +426,7 @@ function generateConfig() {
 		return 1
 	}
 
-	if ! cat >"${config_tmp}" <<EOF; then
+	if ! cat >"${config_tmp}" <<EOF
 nserver ${DNS1}
 nserver ${DNS2}
 
@@ -434,6 +434,7 @@ log
 logformat "L%t%. L%t.%. %N.%p %E %U %C:%c %R:%r %O %I %h %T"
 
 EOF
+	then
 		rm -f "${config_tmp}"
 		return 1
 	fi
@@ -445,7 +446,7 @@ EOF
 		}
 	fi
 
-	if ! cat >>"${config_tmp}" <<EOF; then
+	if ! cat >>"${config_tmp}" <<EOF
 
 auth strong
 allow *
@@ -453,6 +454,7 @@ proxy -p${HTTP_PORT}
 socks -p${SOCKS_PORT}
 flush
 EOF
+	then
 		rm -f "${config_tmp}"
 		return 1
 	fi
@@ -522,7 +524,7 @@ function saveParams() {
 		rm -f "${params_tmp}"
 		return 1
 	}
-	if ! cat >"${params_tmp}" <<EOF; then
+	if ! cat >"${params_tmp}" <<EOF
 SERVER_PUB_IP=${SERVER_PUB_IP}
 HTTP_PORT=${HTTP_PORT}
 SOCKS_PORT=${SOCKS_PORT}
@@ -530,6 +532,7 @@ DNS1=${DNS1}
 DNS2=${DNS2}
 IPTABLES_AVAILABLE=${IPTABLES_AVAILABLE}
 EOF
+	then
 		rm -f "${params_tmp}"
 		return 1
 	fi

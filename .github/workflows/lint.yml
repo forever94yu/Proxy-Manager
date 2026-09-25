@@ -17,6 +17,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: mfinelli/setup-shfmt@v3
+        with:
+          shfmt-version: '3.14.1'
       - run: find . -type f -name '*.sh' -not -path './web/node_modules/*' -print0 | xargs -0 shfmt -d
 
   control-plane:
