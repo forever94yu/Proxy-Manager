@@ -10,6 +10,7 @@ Proxy Manager 是一个面向 3proxy 的多服务器控制面。项目保留原�
 - 多选服务器执行批量部署、启动、停止和重启。
 - 创建、修改、轮换密码和删除代理账号。
 - 将同一个代理账号分配到一台或多台服务器。
+- 为代理账号设置流量额度（多台服务器合计，上行 + 下行）、使用期限和按日/周/月的自动流量重置；支持手动重置流量、启用和停用。超额或到期后账号在节点上自动停用并断开连接。
 - 逐服务器记录部署和同步结果，在任务详情中展示每个目标的状态与错误，支持部分失败和只重试失败目标。
 - 使用 HttpOnly 会话保护控制台，使用 AES-256-GCM 加密落盘凭据。
 
@@ -48,7 +49,7 @@ npm run dev
 密码：ProxyManager!2026
 ```
 
-默认 `EXECUTOR_MODE=mock`。此模式完整执行 API、数据库、任务队列和页面流程，但不会连接真实服务器，适合本地验收界面和业务操作。主机名以 `fail.` 开头、包含 `.invalid`，或标签包含 `mock:fail` 时，可模拟目标服务器失败。
+默认 `EXECUTOR_MODE=mock`。此模式完整执行 API、数据库、任务队列和页面流程，但不会连接真实服务器，适合本地验收界面和业务操作；模拟节点每次流量采集会为每个启用账号增加 32 MiB 用量，便于验证额度流程。主机名以 `fail.` 开头、包含 `.invalid`，或标签包含 `mock:fail` 时，可模拟目标服务器失败。
 
 Vite 运行在 `5173`，Go API 运行在 `8080`。生产构建：
 
@@ -128,6 +129,13 @@ printf '%s\n' 'SafePass_123!' | sudo ./3proxy-install.sh --api user-add alice
 printf '%s\n' 'NewPass_456!' | sudo ./3proxy-install.sh --api user-update alice alice_new
 sudo ./3proxy-install.sh --api user-delete alice_new
 sudo ./3proxy-install.sh --api service restart
+# 流量策略：可选的第二行 stdin 为 "STATE CAP_MB PERIOD"
+printf '%s
+%s
+' 'SafePass_123!' 'enabled 10240 0' | sudo ./3proxy-install.sh --api user-add bob
+printf '%s
+' 'bob disabled 10240 0' | sudo ./3proxy-install.sh --api policy-apply
+sudo ./3proxy-install.sh --api traffic
 ```
 
 用户名规则为 `[A-Za-z0-9_-]{1,64}`。密码长度为 8 到 128，只允许字母、数字和 `_@%+=,.!?-`。账号变更使用文件锁、原子写入和服务失败回滚。
@@ -149,6 +157,8 @@ sudo ./3proxy-install.sh --api service restart
 | `WORKER_POLL_INTERVAL` | `300ms` | 持久化任务轮询间隔 |
 | `SSH_TIMEOUT` | `10s` | SSH 连接超时 |
 | `COMMAND_TIMEOUT` | `15m` | 单个远程操作超时 |
+| `TRAFFIC_SYNC_INTERVAL` | `5m` | 从节点采集流量计数的间隔（最小 30s） |
+| `TRAFFIC_RECONCILE_INTERVAL` | `30s` | 检查周期重置、到期和额度用尽并下发策略的间隔（最小 5s） |
 | `COOKIE_SECURE` | 生产为 `true` | 只通过 HTTPS 发送会话 Cookie |
 | `CORS_ORIGINS` | 空 | 分离部署时允许的来源列表 |
 | `TRUSTED_PROXY_CIDRS` | 空 | 可提供转发 IP/协议头的可信反向代理地址或 CIDR |
@@ -174,7 +184,7 @@ shfmt -d 3proxy-install.sh tests/docker
 ./tests/docker/run.sh --dist ubuntu-24.04
 ```
 
-Docker 场景覆盖安装、交互增删、重复用户名、非交互 API 的查询/新增/修改/删除、服务启停和卸载。测试会创建临时容器；实机测试 `tests/3proxy-install-test.sh` 会真实修改本机 `/etc/3proxy`，只能在专用测试机上运行。
+Docker 场景覆盖安装、交互增删、重复用户名、非交互 API 的查询/新增/修改/删除、流量策略下发与流量报告、服务启停和卸载。测试会创建临时容器；实机测试 `tests/3proxy-install-test.sh` 会真实修改本机 `/etc/3proxy`，只能在专用测试机上运行。
 
 ## 3proxy 安装器支持范围
 

@@ -79,6 +79,8 @@ func (a *API) Handler() http.Handler {
 	protected.HandleFunc("GET /api/v1/users/{id}", a.getUser)
 	protected.HandleFunc("PUT /api/v1/users/{id}", a.updateUser)
 	protected.HandleFunc("DELETE /api/v1/users/{id}", a.deleteUser)
+	protected.HandleFunc("POST /api/v1/users/{id}/traffic/reset", a.resetUserTraffic)
+	protected.HandleFunc("POST /api/v1/users/{id}/state", a.setUserState)
 
 	protected.HandleFunc("GET /api/v1/jobs", a.listJobs)
 	protected.HandleFunc("GET /api/v1/jobs/{id}", a.getJob)
@@ -429,6 +431,7 @@ func (a *API) serviceServers(w http.ResponseWriter, r *http.Request) {
 func (a *API) listUsers(w http.ResponseWriter, r *http.Request) {
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
 	syncStatus := strings.TrimSpace(r.URL.Query().Get("syncStatus"))
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
 	if err := validateSearch(search); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error(), nil)
 		return
@@ -437,7 +440,11 @@ func (a *API) listUsers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "validation_error", "Sync status filter is invalid", FieldErrors{"syncStatus": "Invalid sync status"})
 		return
 	}
-	users, err := a.store.ListProxyUsers(r.Context(), search, syncStatus)
+	if status != "" && !validUserStatus(status) {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", "User status filter is invalid", FieldErrors{"status": "Invalid status"})
+		return
+	}
+	users, err := a.store.ListProxyUsers(r.Context(), search, syncStatus, status)
 	if err != nil {
 		a.internalError(w, r, err)
 		return
@@ -463,6 +470,12 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "validation_error", "Proxy user details are invalid", fields)
 		return
 	}
+	now := time.Now().UTC()
+	user := ProxyUser{ServerIDs: input.ServerIDs, ServerCount: len(input.ServerIDs), SyncStatus: "pending", CreatedAt: now, UpdatedAt: now}
+	if fields := applyUsageInput(&user, input, true, now); len(fields) > 0 {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", "Proxy user details are invalid", fields)
+		return
+	}
 	servers, err := a.serversByID(r.Context(), input.ServerIDs)
 	if err != nil {
 		a.storeError(w, r, err, "One or more selected servers do not exist")
@@ -485,12 +498,9 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, r, err)
 		return
 	}
-	now := time.Now().UTC()
-	user := ProxyUser{
-		ID: userID, Username: input.Username, PasswordCipher: userCipher,
-		ServerIDs: input.ServerIDs, ServerCount: len(input.ServerIDs), SyncStatus: "pending",
-		CreatedAt: now, UpdatedAt: now,
-	}
+	user.ID = userID
+	user.Username = input.Username
+	user.PasswordCipher = userCipher
 	targets, err := makeTargets(servers, func(string) TargetTask {
 		return TargetTask{Action: "user-add", Username: input.Username, PasswordCiphertext: jobCipher}
 	})
@@ -513,7 +523,12 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.worker.Notify()
-	data := map[string]any{"user": user, "job": job}
+	created, err := a.store.GetProxyUser(r.Context(), userID)
+	if err != nil {
+		a.internalError(w, r, err)
+		return
+	}
+	data := map[string]any{"user": created, "job": job}
 	if generated {
 		data["generatedPassword"] = password
 	}
@@ -531,6 +546,14 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if fields := validateUserInput(&input, false); len(fields) > 0 {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", "Proxy user details are invalid", fields)
+		return
+	}
+	expectedUpdatedAt := existing.UpdatedAt
+	previousUsername := existing.Username
+	previousServerIDs := existing.ServerIDs
+	now := time.Now().UTC()
+	if fields := applyUsageInput(&existing, input, false, now); len(fields) > 0 {
 		writeError(w, http.StatusUnprocessableEntity, "validation_error", "Proxy user details are invalid", fields)
 		return
 	}
@@ -565,9 +588,9 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, r, err)
 		return
 	}
-	oldSet := stringSet(existing.ServerIDs)
+	oldSet := stringSet(previousServerIDs)
 	newSet := stringSet(input.ServerIDs)
-	allServerIDs := sortedUnique(append(append([]string(nil), existing.ServerIDs...), input.ServerIDs...))
+	allServerIDs := sortedUnique(append(append([]string(nil), previousServerIDs...), input.ServerIDs...))
 	servers, err := a.serversByID(r.Context(), allServerIDs)
 	if err != nil {
 		a.storeError(w, r, err, "One or more selected servers do not exist")
@@ -578,9 +601,9 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request) {
 		_, isBound := newSet[serverID]
 		switch {
 		case wasBound && isBound:
-			return TargetTask{Action: "user-update", OldUsername: existing.Username, Username: input.Username, PasswordCiphertext: jobCipher}
+			return TargetTask{Action: "user-update", OldUsername: previousUsername, Username: input.Username, PasswordCiphertext: jobCipher}
 		case wasBound:
-			return TargetTask{Action: "user-delete", Username: existing.Username}
+			return TargetTask{Action: "user-delete", Username: previousUsername}
 		default:
 			return TargetTask{Action: "user-add", Username: input.Username, PasswordCiphertext: jobCipher}
 		}
@@ -589,13 +612,12 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request) {
 		a.internalError(w, r, err)
 		return
 	}
-	expectedUpdatedAt := existing.UpdatedAt
 	existing.Username = input.Username
 	existing.PasswordCipher = userCipher
 	existing.ServerIDs = input.ServerIDs
 	existing.ServerCount = len(input.ServerIDs)
 	existing.SyncStatus = "pending"
-	existing.UpdatedAt = time.Now().UTC()
+	existing.UpdatedAt = now
 	jobSpec := NewJob{ID: jobID, Type: "user_update", Actor: actorFromContext(r.Context()), EntityType: "proxy_user", EntityID: existing.ID, Targets: targets}
 	if err := a.store.UpdateProxyUser(r.Context(), existing, expectedUpdatedAt, jobSpec); err != nil {
 		message := "A proxy user with this username already exists"
@@ -611,7 +633,12 @@ func (a *API) updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.worker.Notify()
-	data := map[string]any{"user": existing, "job": job}
+	updated, err := a.store.GetProxyUser(r.Context(), existing.ID)
+	if err != nil {
+		a.internalError(w, r, err)
+		return
+	}
+	data := map[string]any{"user": updated, "job": job}
 	if generated {
 		data["generatedPassword"] = password
 	}
@@ -665,6 +692,88 @@ func (a *API) deleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 	a.worker.Notify()
 	writeData(w, http.StatusAccepted, map[string]any{"job": job})
+}
+
+func (a *API) resetUserTraffic(w http.ResponseWriter, r *http.Request) {
+	if !decodeEmptyObject(w, r) {
+		return
+	}
+	a.mutateUserPolicy(w, r, "user_traffic_reset", func(ctx context.Context, user ProxyUser, now time.Time, job *NewJob) error {
+		return a.store.ResetProxyUserTraffic(ctx, user.ID, user.UpdatedAt, now, job)
+	})
+}
+
+func (a *API) setUserState(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if input.Enabled == nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", "Proxy user state is invalid", FieldErrors{"enabled": "Enabled must be true or false"})
+		return
+	}
+	jobType := "user_disable"
+	if *input.Enabled {
+		jobType = "user_enable"
+	}
+	a.mutateUserPolicy(w, r, jobType, func(ctx context.Context, user ProxyUser, now time.Time, job *NewJob) error {
+		return a.store.SetProxyUserEnabled(ctx, user.ID, *input.Enabled, user.UpdatedAt, now, job)
+	})
+}
+
+// mutateUserPolicy applies a change that only affects the traffic policy of a
+// user and queues a policy-apply on every bound server. Users without servers
+// are updated without a job.
+func (a *API) mutateUserPolicy(w http.ResponseWriter, r *http.Request, jobType string, mutate func(context.Context, ProxyUser, time.Time, *NewJob) error) {
+	user, err := a.userFromPath(r)
+	if err != nil {
+		a.storeError(w, r, err, "Proxy user not found")
+		return
+	}
+	var jobSpec *NewJob
+	if len(user.ServerIDs) > 0 {
+		servers, err := a.serversByID(r.Context(), user.ServerIDs)
+		if err != nil {
+			a.storeError(w, r, err, "One or more selected servers do not exist")
+			return
+		}
+		targets, err := makeTargets(servers, func(string) TargetTask { return TargetTask{Action: "policy-apply"} })
+		if err != nil {
+			a.internalError(w, r, err)
+			return
+		}
+		jobSpec = &NewJob{ID: newID(), Type: jobType, Actor: actorFromContext(r.Context()), EntityType: "proxy_user", EntityID: user.ID, Targets: targets}
+	}
+	if err := mutate(r.Context(), user, time.Now().UTC(), jobSpec); err != nil {
+		message := "Proxy user not found"
+		if errors.Is(err, ErrStale) {
+			message = "Proxy user changed while this edit was being prepared; reload and try again"
+		}
+		a.storeError(w, r, err, message)
+		return
+	}
+	updated, err := a.store.GetProxyUser(r.Context(), user.ID)
+	if err != nil {
+		a.internalError(w, r, err)
+		return
+	}
+	data := map[string]any{"user": updated}
+	if jobSpec != nil {
+		a.worker.Notify()
+		job, err := a.store.GetJob(r.Context(), jobSpec.ID)
+		if err != nil {
+			a.internalError(w, r, err)
+			return
+		}
+		data["job"] = job
+	}
+	status := http.StatusOK
+	if jobSpec != nil {
+		status = http.StatusAccepted
+	}
+	writeData(w, status, data)
 }
 
 func (a *API) listJobs(w http.ResponseWriter, r *http.Request) {

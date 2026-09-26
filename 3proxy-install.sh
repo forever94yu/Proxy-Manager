@@ -16,6 +16,34 @@ readonly PROXY3_SERVICE="/etc/systemd/system/3proxy.service"
 readonly PROXY3_PARAMS="/etc/3proxy/params"
 readonly PROXY3_CONFIG_DIR="/etc/3proxy"
 readonly PROXY3_LOCK="/run/lock/3proxy-manager.lock"
+# Per-user traffic policy, one "NAME INDEX STATE CAP_MB PERIOD" line per user.
+# INDEX selects the counter pair (2*INDEX-1 = upload, 2*INDEX = total), STATE is
+# enabled|disabled, CAP_MB is the node-local total-traffic cap in MiB and PERIOD
+# is the control-plane accounting period token. A new PERIOD allocates a fresh,
+# zeroed counter pair, which is how traffic is reset.
+readonly PROXY3_POLICY="/etc/3proxy/3proxy.cfg.policy"
+# Binary 3proxy counter store (see `counter` in 3proxy.cfg(3)).
+readonly PROXY3_COUNTERS="/etc/3proxy/3proxy.counters"
+# 1 PiB expressed in MiB: the cap used for "no limit" counter rules.
+readonly TRAFFIC_UNLIMITED_MB=1073741824
+# Long-lived connections report their traffic to the counters every 64 MiB.
+readonly TRAFFIC_LOGDUMP_BYTES=67108864
+# Layout of the 3proxy counter file with a 64-bit time_t: a 16-byte header
+# followed by 24-byte records (uint64 traffic, time_t cleared, time_t updated).
+readonly COUNTER_HEADER_BYTES=16
+readonly COUNTER_RECORD_BYTES=24
+
+declare -A POLICY_INDEX=()
+declare -A POLICY_STATE=()
+declare -A POLICY_CAP=()
+declare -A POLICY_PERIOD=()
+declare -A POLICY_RESERVED=()
+NEW_POLICY_INDEXES=()
+ALLOCATED_POLICY_INDEX=""
+REMOVED_POLICY_NAME=""
+REMOVED_POLICY_INDEX=""
+REMOVED_POLICY_CAP=""
+REMOVED_POLICY_PERIOD=""
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -94,6 +122,28 @@ function isValidClientName() {
 function isValidClientPassword() {
 	local password=${1:-}
 	[[ ${#password} -ge 8 && ${#password} -le 128 && ${password} =~ ^[a-zA-Z0-9_@%+=,.!?-]+$ ]]
+}
+
+function isValidPolicyState() {
+	[[ ${1:-} == "enabled" || ${1:-} == "disabled" ]]
+}
+
+function isValidPolicyCap() {
+	local value=${1:-}
+	[[ ${value} =~ ^[1-9][0-9]{0,9}$ ]] && [ "${value}" -le "${TRAFFIC_UNLIMITED_MB}" ]
+}
+
+function isValidPolicyPeriod() {
+	[[ ${1:-} =~ ^(0|[1-9][0-9]{0,11})$ ]]
+}
+
+function isValidPolicyIndex() {
+	[[ ${1:-} =~ ^[1-9][0-9]{0,6}$ ]]
+}
+
+function isValidPolicyEntry() {
+	isValidClientName "${1:-}" && isValidPolicyIndex "${2:-}" && isValidPolicyState "${3:-}" &&
+		isValidPolicyCap "${4:-}" && isValidPolicyPeriod "${5:-}"
 }
 
 function validateRuntimeParams() {
@@ -419,12 +469,29 @@ function install3proxyCore() {
 }
 
 function generateConfig() {
-	local config_tmp
+	local config_tmp line name index state cap period extra
+	local -A active_state=()
+	local -a count_rules=()
 	config_tmp=$(mktemp "${PROXY3_CONFIG}.tmp.XXXXXX") || return 1
 	chmod 600 "${config_tmp}" || {
 		rm -f "${config_tmp}"
 		return 1
 	}
+
+	if [ -f "${PROXY3_POLICY}" ]; then
+		while read -r name index state cap period extra || [[ -n ${name} ]]; do
+			[[ -z ${name} ]] && continue
+			if [[ -n ${extra} ]] || ! isValidPolicyEntry "${name}" "${index}" "${state}" "${cap}" "${period}"; then
+				echo "Invalid traffic policy file: ${PROXY3_POLICY}" >&2
+				rm -f "${config_tmp}"
+				return 1
+			fi
+			active_state[${name}]=${state}
+			# countout only exists so 3proxy also adds uploaded bytes to countall.
+			count_rules+=("countout $((index * 2 - 1))/${name} N ${TRAFFIC_UNLIMITED_MB} ${name}")
+			count_rules+=("countall $((index * 2))/${name} N ${cap} ${name}")
+		done <"${PROXY3_POLICY}"
+	fi
 
 	if ! cat >"${config_tmp}" <<EOF
 nserver ${DNS1}
@@ -432,6 +499,8 @@ nserver ${DNS2}
 
 log
 logformat "L%t%. L%t.%. %N.%p %E %U %C:%c %R:%r %O %I %h %T"
+logdump ${TRAFFIC_LOGDUMP_BYTES} ${TRAFFIC_LOGDUMP_BYTES}
+counter ${PROXY3_COUNTERS}
 
 EOF
 	then
@@ -439,25 +508,32 @@ EOF
 		return 1
 	fi
 
+	# Disabled, expired or exhausted users are left out of the active user list.
+	# On reload 3proxy re-authenticates established sessions, so this also
+	# terminates their open connections.
 	if [ -f "${PROXY3_CONFIG}.users" ]; then
-		cat "${PROXY3_CONFIG}.users" >>"${config_tmp}" || {
+		while IFS= read -r line || [[ -n ${line} ]]; do
+			if [[ ${line} =~ ^users[[:space:]]+([a-zA-Z0-9_-]+): ]] &&
+				[[ ${active_state[${BASH_REMATCH[1]}]:-enabled} == "disabled" ]]; then
+				continue
+			fi
+			printf '%s\n' "${line}"
+		done <"${PROXY3_CONFIG}.users" >>"${config_tmp}" || {
 			rm -f "${config_tmp}"
 			return 1
 		}
 	fi
 
-	if ! cat >>"${config_tmp}" <<EOF
-
-auth strong
-allow *
-proxy -p${HTTP_PORT}
-socks -p${SOCKS_PORT}
-flush
-EOF
-	then
+	{
+		printf '\nauth strong\n'
+		if [[ ${#count_rules[@]} -gt 0 ]]; then
+			printf '%s\n' "${count_rules[@]}"
+		fi
+		printf 'allow *\nproxy -p%s\nsocks -p%s\nflush\n' "${HTTP_PORT}" "${SOCKS_PORT}"
+	} >>"${config_tmp}" || {
 		rm -f "${config_tmp}"
 		return 1
-	fi
+	}
 
 	mv -f "${config_tmp}" "${PROXY3_CONFIG}" || return 1
 	chmod 600 "${PROXY3_CONFIG}" || return 1
@@ -477,6 +553,7 @@ After=network.target
 ExecStartPre=/bin/bash -c 'iptables -C INPUT -p tcp --dport ${HTTP_PORT} -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport ${HTTP_PORT} -j ACCEPT'
 ExecStartPre=/bin/bash -c 'iptables -C INPUT -p tcp --dport ${SOCKS_PORT} -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport ${SOCKS_PORT} -j ACCEPT'
 ExecStart=${PROXY3_BINARY} ${PROXY3_CONFIG}
+ExecReload=/bin/kill -USR1 \$MAINPID
 ExecStopPost=/bin/bash -c 'iptables -D INPUT -p tcp --dport ${HTTP_PORT} -j ACCEPT 2>/dev/null || true'
 ExecStopPost=/bin/bash -c 'iptables -D INPUT -p tcp --dport ${SOCKS_PORT} -j ACCEPT 2>/dev/null || true'
 KillMode=process
@@ -496,6 +573,7 @@ After=network.target
 
 [Service]
 ExecStart=${PROXY3_BINARY} ${PROXY3_CONFIG}
+ExecReload=/bin/kill -USR1 \$MAINPID
 KillMode=process
 Restart=on-failure
 LimitNOFILE=65536
@@ -611,35 +689,273 @@ function restartProxyService() {
 	runSystemctl is-active --quiet 3proxy
 }
 
-function commitUsersFile() {
-	local candidate=$1
-	local backup
-	local had_users=false
-	backup=$(mktemp "${PROXY3_CONFIG}.users.backup.XXXXXX") || return 1
+function ensureServiceReloadable() {
+	[ -f "${PROXY3_SERVICE}" ] || return 1
+	grep -q '^ExecReload=' "${PROXY3_SERVICE}" && return 0
+	# Units written by older installer versions cannot be reloaded in place.
+	generateService || return 1
+	runSystemctl daemon-reload
+}
 
-	if [ -f "${PROXY3_CONFIG}.users" ]; then
-		cp "${PROXY3_CONFIG}.users" "${backup}" || {
-			rm -f "${backup}"
-			return 1
-		}
-		had_users=true
+function proxyListenerInodes() {
+	local port_hex
+	printf -v port_hex ':%04X' "${HTTP_PORT}"
+	awk -v port="${port_hex}" '$4 == "0A" && substr($2, length($2) - 4) == port { print $10 }' \
+		/proc/net/tcp /proc/net/tcp6 2>/dev/null | sort | tr '\n' ' '
+}
+
+# Reload 3proxy in place (SIGUSR1). Unlike a restart this keeps established
+# sessions of unaffected users, and 3proxy writes its traffic counters to disk
+# before re-reading the configuration. 3proxy opens the new listener before it
+# closes the old one; the reload is complete once only new listeners remain.
+# Connections accepted by the old listener in between are reset, so this runs
+# only when the configuration actually changed.
+function reloadProxyService() {
+	local before after attempt inode stale
+	ensureServiceReloadable || return 1
+	before=$(proxyListenerInodes)
+	runSystemctl reload 3proxy || return 1
+	for ((attempt = 0; attempt < 50; attempt++)); do
+		sleep 0.2
+		after=$(proxyListenerInodes)
+		[[ -n ${after} ]] || continue
+		stale=false
+		for inode in ${before}; do
+			if [[ " ${after} " == *" ${inode} "* ]]; then
+				stale=true
+				break
+			fi
+		done
+		if [[ ${stale} == "false" ]]; then
+			runSystemctl is-active --quiet 3proxy
+			return
+		fi
+	done
+	return 1
+}
+
+function applyProxyConfig() {
+	if ! runSystemctl is-active --quiet 3proxy; then
+		runSystemctl start 3proxy || return 1
+		runSystemctl is-active --quiet 3proxy
+		return
 	fi
+	if reloadProxyService; then
+		return 0
+	fi
+	echo "3proxy did not confirm the in-place reload; restarting the service" >&2
+	restartProxyService
+}
 
-	mv -f "${candidate}" "${PROXY3_CONFIG}.users" || {
-		rm -f "${backup}"
+# 3proxy only persists counters once a minute and on reload, not on SIGTERM.
+function flushTrafficCounters() {
+	[ -f "${PROXY3_POLICY}" ] || return 0
+	runSystemctl is-active --quiet 3proxy || return 0
+	reloadProxyService >/dev/null 2>&1 || true
+}
+
+function loadPolicy() {
+	local name index state cap period extra
+	POLICY_INDEX=()
+	POLICY_STATE=()
+	POLICY_CAP=()
+	POLICY_PERIOD=()
+	POLICY_RESERVED=()
+	NEW_POLICY_INDEXES=()
+	[ -f "${PROXY3_POLICY}" ] || return 0
+	while read -r name index state cap period extra || [[ -n ${name} ]]; do
+		[[ -z ${name} ]] && continue
+		if [[ -n ${extra} ]] || ! isValidPolicyEntry "${name}" "${index}" "${state}" "${cap}" "${period}" ||
+			[[ -n ${POLICY_INDEX[${name}]:-} || -n ${POLICY_RESERVED[${index}]:-} ]]; then
+			echo "Invalid traffic policy file: ${PROXY3_POLICY}" >&2
+			return 1
+		fi
+		POLICY_INDEX[${name}]=${index}
+		POLICY_STATE[${name}]=${state}
+		POLICY_CAP[${name}]=${cap}
+		POLICY_PERIOD[${name}]=${period}
+		POLICY_RESERVED[${index}]=1
+	done <"${PROXY3_POLICY}"
+}
+
+# Pick a counter pair that is used neither by the running configuration nor by
+# the pending one. An index released in this transaction stays reserved,
+# because 3proxy writes its final value on the next reload.
+function allocatePolicyIndex() {
+	local index=1
+	while [[ -n ${POLICY_RESERVED[${index}]:-} ]]; do
+		index=$((index + 1))
+	done
+	POLICY_RESERVED[${index}]=1
+	NEW_POLICY_INDEXES+=("${index}")
+	ALLOCATED_POLICY_INDEX=${index}
+}
+
+# Returns 0 when the in-memory policy changed.
+function setPolicyEntry() {
+	local name=$1 state=$2 cap=$3 period=$4
+	if [[ -n ${POLICY_INDEX[${name}]:-} && ${POLICY_PERIOD[${name}]} == "${period}" ]]; then
+		if [[ ${POLICY_STATE[${name}]} == "${state}" && ${POLICY_CAP[${name}]} == "${cap}" ]]; then
+			return 1
+		fi
+		POLICY_STATE[${name}]=${state}
+		POLICY_CAP[${name}]=${cap}
+		return 0
+	fi
+	# A new accounting period starts from a fresh, zeroed counter pair.
+	allocatePolicyIndex
+	POLICY_INDEX[${name}]=${ALLOCATED_POLICY_INDEX}
+	POLICY_STATE[${name}]=${state}
+	POLICY_CAP[${name}]=${cap}
+	POLICY_PERIOD[${name}]=${period}
+	return 0
+}
+
+function renamePolicyEntry() {
+	local old_name=$1 new_name=$2
+	[[ ${old_name} == "${new_name}" || -z ${POLICY_INDEX[${old_name}]:-} ]] && return 1
+	POLICY_INDEX[${new_name}]=${POLICY_INDEX[${old_name}]}
+	POLICY_STATE[${new_name}]=${POLICY_STATE[${old_name}]}
+	POLICY_CAP[${new_name}]=${POLICY_CAP[${old_name}]}
+	POLICY_PERIOD[${new_name}]=${POLICY_PERIOD[${old_name}]}
+	removePolicyEntry "${old_name}"
+}
+
+function removePolicyEntry() {
+	local name=$1
+	[[ -z ${POLICY_INDEX[${name}]:-} ]] && return 1
+	unset "POLICY_INDEX[${name}]" "POLICY_STATE[${name}]" "POLICY_CAP[${name}]" "POLICY_PERIOD[${name}]"
+	return 0
+}
+
+function policyNames() {
+	[[ ${#POLICY_INDEX[@]} -eq 0 ]] && return 0
+	printf '%s\n' "${!POLICY_INDEX[@]}" | LC_ALL=C sort
+}
+
+function writePolicyCandidate() {
+	local candidate name
+	candidate=$(mktemp "${PROXY3_POLICY}.tmp.XXXXXX") || return 1
+	chmod 600 "${candidate}" || {
+		rm -f "${candidate}"
 		return 1
 	}
-	chmod 600 "${PROXY3_CONFIG}.users" || return 1
-	if generateConfig && restartProxyService; then
-		rm -f "${backup}"
-		return 0
+	for name in $(policyNames); do
+		printf '%s %s %s %s %s\n' "${name}" "${POLICY_INDEX[${name}]}" "${POLICY_STATE[${name}]}" \
+			"${POLICY_CAP[${name}]}" "${POLICY_PERIOD[${name}]}"
+	done >"${candidate}" || {
+		rm -f "${candidate}"
+		return 1
+	}
+	printf '%s' "${candidate}"
+}
+
+function zeroCounterSlot() {
+	local slot=$1 offset size
+	[ -f "${PROXY3_COUNTERS}" ] || return 0
+	offset=$((COUNTER_HEADER_BYTES + (slot - 1) * COUNTER_RECORD_BYTES))
+	size=$(stat -c %s "${PROXY3_COUNTERS}" 2>/dev/null || echo 0)
+	[[ ${size} =~ ^[0-9]+$ ]] && [ "${size}" -gt "${offset}" ] || return 0
+	dd if=/dev/zero of="${PROXY3_COUNTERS}" bs=1 seek="${offset}" count="${COUNTER_RECORD_BYTES}" \
+		conv=notrunc status=none
+}
+
+function counterBytes() {
+	local slot=$1 offset value
+	[ -f "${PROXY3_COUNTERS}" ] || {
+		echo 0
+		return
+	}
+	offset=$((COUNTER_HEADER_BYTES + (slot - 1) * COUNTER_RECORD_BYTES))
+	value=$(od -A n -t u8 -j "${offset}" -N 8 "${PROXY3_COUNTERS}" 2>/dev/null | tr -d ' \n')
+	[[ ${value} =~ ^[0-9]+$ ]] || value=0
+	echo "${value}"
+}
+
+function reportTraffic() {
+	local name index line
+	apiResult "traffic_report" "v1"
+	if [ -f "${PROXY3_CONFIG}.users" ]; then
+		while IFS= read -r line || [[ -n ${line} ]]; do
+			if [[ ${line} =~ ^users[[:space:]]+([a-zA-Z0-9_-]+): ]]; then
+				apiResult "node_user" "${BASH_REMATCH[1]}"
+			fi
+		done <"${PROXY3_CONFIG}.users"
+	fi
+	if [[ -n ${REMOVED_POLICY_NAME} ]]; then
+		# Final value of the counter of an account deleted in this run; the
+		# reload that applied the deletion wrote it to disk.
+		printf 'PM\ttraffic\t%s\tremoved\t%s\t%s\t%s\t%s\n' "${REMOVED_POLICY_NAME}" "${REMOVED_POLICY_CAP}" \
+			"${REMOVED_POLICY_PERIOD}" "${REMOVED_POLICY_INDEX}" "$(counterBytes $((REMOVED_POLICY_INDEX * 2)))"
+	fi
+	for name in $(policyNames); do
+		index=${POLICY_INDEX[${name}]}
+		printf 'PM\ttraffic\t%s\t%s\t%s\t%s\t%s\t%s\n' "${name}" "${POLICY_STATE[${name}]}" \
+			"${POLICY_CAP[${name}]}" "${POLICY_PERIOD[${name}]}" "${index}" "$(counterBytes $((index * 2)))"
+	done
+}
+
+# Atomically replace the users and/or policy files, then apply the generated
+# configuration. Either candidate may be empty. On failure both files are
+# restored and the previous configuration is re-applied.
+function commitNodeState() {
+	local users_candidate=${1:-} policy_candidate=${2:-}
+	local users_backup="" policy_backup="" had_users=false had_policy=false index
+
+	if [[ -n ${users_candidate} ]]; then
+		users_backup=$(mktemp "${PROXY3_CONFIG}.users.backup.XXXXXX") || return 1
+		if [ -f "${PROXY3_CONFIG}.users" ]; then
+			cp "${PROXY3_CONFIG}.users" "${users_backup}" || {
+				rm -f "${users_backup}"
+				return 1
+			}
+			had_users=true
+		fi
+	fi
+	if [[ -n ${policy_candidate} ]]; then
+		policy_backup=$(mktemp "${PROXY3_POLICY}.backup.XXXXXX") || {
+			rm -f "${users_backup}"
+			return 1
+		}
+		if [ -f "${PROXY3_POLICY}" ]; then
+			cp "${PROXY3_POLICY}" "${policy_backup}" || {
+				rm -f "${users_backup}" "${policy_backup}"
+				return 1
+			}
+			had_policy=true
+		fi
+	fi
+
+	if { [[ -z ${users_candidate} ]] || {
+		mv -f "${users_candidate}" "${PROXY3_CONFIG}.users" && chmod 600 "${PROXY3_CONFIG}.users"
+	}; } && { [[ -z ${policy_candidate} ]] || {
+		mv -f "${policy_candidate}" "${PROXY3_POLICY}" && chmod 600 "${PROXY3_POLICY}"
+	}; }; then
+		for index in "${NEW_POLICY_INDEXES[@]}"; do
+			zeroCounterSlot $((index * 2 - 1))
+			zeroCounterSlot $((index * 2))
+		done
+		if generateConfig && applyProxyConfig; then
+			rm -f "${users_backup}" "${policy_backup}"
+			return 0
+		fi
 	fi
 
 	echo "Failed to apply user configuration; restoring the previous version" >&2
-	if [[ ${had_users} == "true" ]]; then
-		mv -f "${backup}" "${PROXY3_CONFIG}.users"
-	else
-		rm -f "${PROXY3_CONFIG}.users" "${backup}"
+	rm -f "${users_candidate}" "${policy_candidate}"
+	if [[ -n ${users_candidate} ]]; then
+		if [[ ${had_users} == "true" ]]; then
+			mv -f "${users_backup}" "${PROXY3_CONFIG}.users"
+		else
+			rm -f "${PROXY3_CONFIG}.users" "${users_backup}"
+		fi
+	fi
+	if [[ -n ${policy_candidate} ]]; then
+		if [[ ${had_policy} == "true" ]]; then
+			mv -f "${policy_backup}" "${PROXY3_POLICY}"
+		else
+			rm -f "${PROXY3_POLICY}" "${policy_backup}"
+		fi
 	fi
 	generateConfig || true
 	restartProxyService || true
@@ -649,15 +965,20 @@ function commitUsersFile() {
 function addClientRecord() {
 	local name=$1
 	local password=$2
-	local users_tmp
+	local policy_state=${3:-} policy_cap=${4:-} policy_period=${5:-}
+	local users_tmp policy_tmp="" policy_changed=false
 
 	isValidClientName "${name}" || return 2
 	isValidClientPassword "${password}" || return 2
+	if [[ -n ${policy_state} ]] && ! isValidPolicyEntry "${name}" 1 "${policy_state}" "${policy_cap}" "${policy_period}"; then
+		return 2
+	fi
 	acquireConfigLock || return 1
 
 	if [ -f "${PROXY3_CONFIG}.users" ] && grep -q "^users ${name}:" "${PROXY3_CONFIG}.users"; then
 		return 3
 	fi
+	loadPolicy || return 1
 
 	users_tmp=$(mktemp "${PROXY3_CONFIG}.users.tmp.XXXXXX") || return 1
 	if [ -f "${PROXY3_CONFIG}.users" ]; then
@@ -668,18 +989,34 @@ function addClientRecord() {
 	fi
 	printf 'users %s:CL:%s\n' "${name}" "${password}" >>"${users_tmp}"
 	chmod 600 "${users_tmp}"
-	commitUsersFile "${users_tmp}"
+	# An orphaned policy entry must not carry an old user's state to a new one.
+	removePolicyEntry "${name}" && policy_changed=true
+	if [[ -n ${policy_state} ]]; then
+		setPolicyEntry "${name}" "${policy_state}" "${policy_cap}" "${policy_period}"
+		policy_changed=true
+	fi
+	if [[ ${policy_changed} == "true" ]]; then
+		policy_tmp=$(writePolicyCandidate) || {
+			rm -f "${users_tmp}"
+			return 1
+		}
+	fi
+	commitNodeState "${users_tmp}" "${policy_tmp}"
 }
 
 function updateClientRecord() {
 	local old_name=$1
 	local new_name=$2
 	local password=$3
-	local users_tmp line found=false
+	local policy_state=${4:-} policy_cap=${5:-} policy_period=${6:-}
+	local users_tmp line found=false policy_tmp="" policy_changed=false
 
 	isValidClientName "${old_name}" || return 2
 	isValidClientName "${new_name}" || return 2
 	isValidClientPassword "${password}" || return 2
+	if [[ -n ${policy_state} ]] && ! isValidPolicyEntry "${new_name}" 1 "${policy_state}" "${policy_cap}" "${policy_period}"; then
+		return 2
+	fi
 	acquireConfigLock || return 1
 
 	if [ ! -f "${PROXY3_CONFIG}.users" ] || ! grep -q "^users ${old_name}:" "${PROXY3_CONFIG}.users"; then
@@ -688,6 +1025,7 @@ function updateClientRecord() {
 	if [[ ${old_name} != "${new_name}" ]] && grep -q "^users ${new_name}:" "${PROXY3_CONFIG}.users"; then
 		return 3
 	fi
+	loadPolicy || return 1
 
 	users_tmp=$(mktemp "${PROXY3_CONFIG}.users.tmp.XXXXXX") || return 1
 	while IFS= read -r line || [[ -n ${line} ]]; do
@@ -703,18 +1041,33 @@ function updateClientRecord() {
 		return 4
 	fi
 	chmod 600 "${users_tmp}"
-	commitUsersFile "${users_tmp}"
+	# A rename keeps the counters and the state of the account.
+	if [[ ${old_name} != "${new_name}" ]]; then
+		removePolicyEntry "${new_name}" && policy_changed=true
+		renamePolicyEntry "${old_name}" "${new_name}" && policy_changed=true
+	fi
+	if [[ -n ${policy_state} ]] && setPolicyEntry "${new_name}" "${policy_state}" "${policy_cap}" "${policy_period}"; then
+		policy_changed=true
+	fi
+	if [[ ${policy_changed} == "true" ]]; then
+		policy_tmp=$(writePolicyCandidate) || {
+			rm -f "${users_tmp}"
+			return 1
+		}
+	fi
+	commitNodeState "${users_tmp}" "${policy_tmp}"
 }
 
 function deleteClientRecord() {
 	local name=$1
-	local users_tmp line found=false
+	local users_tmp line found=false policy_tmp=""
 
 	isValidClientName "${name}" || return 2
 	acquireConfigLock || return 1
 	if [ ! -f "${PROXY3_CONFIG}.users" ]; then
 		return 4
 	fi
+	loadPolicy || return 1
 
 	users_tmp=$(mktemp "${PROXY3_CONFIG}.users.tmp.XXXXXX") || return 1
 	while IFS= read -r line || [[ -n ${line} ]]; do
@@ -729,7 +1082,66 @@ function deleteClientRecord() {
 		return 4
 	fi
 	chmod 600 "${users_tmp}"
-	commitUsersFile "${users_tmp}"
+	if [[ -n ${POLICY_INDEX[${name}]:-} ]]; then
+		REMOVED_POLICY_NAME=${name}
+		REMOVED_POLICY_INDEX=${POLICY_INDEX[${name}]}
+		REMOVED_POLICY_CAP=${POLICY_CAP[${name}]}
+		REMOVED_POLICY_PERIOD=${POLICY_PERIOD[${name}]}
+	fi
+	if removePolicyEntry "${name}"; then
+		policy_tmp=$(writePolicyCandidate) || {
+			rm -f "${users_tmp}"
+			return 1
+		}
+	fi
+	commitNodeState "${users_tmp}" "${policy_tmp}"
+}
+
+# Apply "NAME STATE CAP_MB PERIOD" lines read from stdin. Entries for users that
+# do not exist on this node are ignored (the control plane may be ahead of the
+# user file) and entries of users that were removed are dropped. Users that are
+# not listed keep their current policy.
+function applyPolicyRecords() {
+	local line name state cap period extra changed=false policy_tmp
+	local -A existing=()
+
+	acquireConfigLock || return 1
+	loadPolicy || return 1
+	if [ -f "${PROXY3_CONFIG}.users" ]; then
+		while IFS= read -r line || [[ -n ${line} ]]; do
+			if [[ ${line} =~ ^users[[:space:]]+([a-zA-Z0-9_-]+): ]]; then
+				existing[${BASH_REMATCH[1]}]=1
+			fi
+		done <"${PROXY3_CONFIG}.users"
+	fi
+
+	while read -r name state cap period extra || [[ -n ${name} ]]; do
+		[[ -z ${name} ]] && continue
+		if [[ -n ${extra} ]] || ! isValidClientName "${name}" || ! isValidPolicyState "${state}" ||
+			! isValidPolicyCap "${cap}" || ! isValidPolicyPeriod "${period}"; then
+			echo "Invalid policy record for ${name:-<empty>}" >&2
+			return 2
+		fi
+		[[ -z ${existing[${name}]:-} ]] && continue
+		if setPolicyEntry "${name}" "${state}" "${cap}" "${period}"; then
+			changed=true
+		fi
+	done
+
+	for name in $(policyNames); do
+		if [[ -z ${existing[${name}]:-} ]]; then
+			removePolicyEntry "${name}" && changed=true
+		fi
+	done
+
+	if [[ ${changed} == "true" ]]; then
+		policy_tmp=$(writePolicyCandidate) || return 1
+		commitNodeState "" "${policy_tmp}" || return 1
+		apiResult "result" "applied"
+	else
+		apiResult "result" "unchanged"
+	fi
+	reportTraffic
 }
 
 function newClient() {
@@ -954,6 +1366,10 @@ function machineDeploy() {
 	else
 		checkIptables
 		if [ -f "${PROXY3_SERVICE}" ]; then
+			if [ -f "${PROXY3_POLICY}" ] && runSystemctl is-active --quiet 3proxy; then
+				# Persist traffic counters; 3proxy does not save them on SIGTERM.
+				runSystemctl kill --signal=USR1 3proxy >/dev/null 2>&1 && sleep 2
+			fi
 			runSystemctl stop 3proxy || true
 		fi
 		mkdir -p "${PROXY3_CONFIG_DIR}"
@@ -983,6 +1399,21 @@ function machineReadPassword() {
 	printf '%s' "${password}"
 }
 
+# Optional second stdin line of user-add/user-update: "STATE CAP_MB PERIOD".
+function machineReadPolicyLine() {
+	local extra
+	POLICY_LINE_STATE=""
+	POLICY_LINE_CAP=""
+	POLICY_LINE_PERIOD=""
+	read -r POLICY_LINE_STATE POLICY_LINE_CAP POLICY_LINE_PERIOD extra || true
+	[[ -z ${POLICY_LINE_STATE} ]] && return 0
+	if [[ -n ${extra} ]] || ! isValidPolicyState "${POLICY_LINE_STATE}" ||
+		! isValidPolicyCap "${POLICY_LINE_CAP}" || ! isValidPolicyPeriod "${POLICY_LINE_PERIOD}"; then
+		echo "Invalid traffic policy line" >&2
+		return 2
+	fi
+}
+
 function machineUserAdd() {
 	if [[ $# -ne 1 ]] || ! isValidClientName "$1"; then
 		echo "Invalid client name" >&2
@@ -995,11 +1426,13 @@ function machineUserAdd() {
 	loadParams
 	local password status=0
 	password=$(machineReadPassword) || return $?
-	addClientRecord "$1" "${password}" || status=$?
+	machineReadPolicyLine || return $?
+	addClientRecord "$1" "${password}" "${POLICY_LINE_STATE}" "${POLICY_LINE_CAP}" "${POLICY_LINE_PERIOD}" || status=$?
 	case ${status} in
 	0)
 		apiResult "result" "created"
 		apiResult "user" "$1"
+		reportTraffic
 		;;
 	3)
 		echo "Client already exists: $1" >&2
@@ -1024,11 +1457,13 @@ function machineUserUpdate() {
 	loadParams
 	local password status=0
 	password=$(machineReadPassword) || return $?
-	updateClientRecord "$1" "$2" "${password}" || status=$?
+	machineReadPolicyLine || return $?
+	updateClientRecord "$1" "$2" "${password}" "${POLICY_LINE_STATE}" "${POLICY_LINE_CAP}" "${POLICY_LINE_PERIOD}" || status=$?
 	case ${status} in
 	0)
 		apiResult "result" "updated"
 		apiResult "user" "$2"
+		reportTraffic
 		;;
 	3)
 		echo "Client already exists: $2" >&2
@@ -1061,6 +1496,7 @@ function machineUserDelete() {
 	0)
 		apiResult "result" "deleted"
 		apiResult "user" "$1"
+		reportTraffic
 		;;
 	4)
 		echo "Client not found: $1" >&2
@@ -1071,6 +1507,36 @@ function machineUserDelete() {
 		return 1
 		;;
 	esac
+}
+
+function machinePolicyApply() {
+	if [[ $# -ne 0 ]]; then
+		echo "Usage: --api policy-apply < NAME STATE CAP_MB PERIOD lines" >&2
+		return 2
+	fi
+	[ -f "${PROXY3_PARAMS}" ] || {
+		echo "3proxy is not installed" >&2
+		return 1
+	}
+	loadParams
+	applyPolicyRecords
+}
+
+function machineTraffic() {
+	if [[ $# -ne 0 ]]; then
+		echo "Usage: --api traffic" >&2
+		return 2
+	fi
+	[ -f "${PROXY3_PARAMS}" ] || {
+		echo "3proxy is not installed" >&2
+		return 1
+	}
+	loadParams
+	# Read-only: the policy file is replaced atomically and 3proxy writes its
+	# counters to disk every minute, so no lock (which a running deployment may
+	# hold for minutes) is needed and established sessions are not disturbed.
+	loadPolicy || return 1
+	reportTraffic
 }
 
 function machineService() {
@@ -1084,6 +1550,11 @@ function machineService() {
 	fi
 	local action=$1
 	local service_status
+	if [[ ${action} == "stop" || ${action} == "restart" ]] && [ -f "${PROXY3_PARAMS}" ]; then
+		loadParams
+		# 3proxy does not save its traffic counters on SIGTERM.
+		flushTrafficCounters
+	fi
 	if [[ ${action} != "status" ]]; then
 		runSystemctl "${action}" 3proxy || return 1
 	fi
@@ -1119,6 +1590,12 @@ function machineMain() {
 		;;
 	user-delete)
 		machineUserDelete "$@"
+		;;
+	policy-apply)
+		machinePolicyApply "$@"
+		;;
+	traffic)
+		machineTraffic "$@"
 		;;
 	service)
 		machineService "$@"

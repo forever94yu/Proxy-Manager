@@ -40,6 +40,27 @@ type Executor interface {
 
 type MockExecutor struct {
 	Delay time.Duration
+	// SimulatedTrafficBytes is added to the counter of every enabled account
+	// on each traffic collection, up to its node cap.
+	SimulatedTrafficBytes int64
+
+	mu    sync.Mutex
+	nodes map[string]*mockNode
+}
+
+// mockNode imitates the account and traffic policy files of one node.
+type mockNode struct {
+	accounts  map[string]*mockAccount
+	nextIndex int
+}
+
+type mockAccount struct {
+	hasPolicy bool
+	state     string
+	capMB     int64
+	period    int64
+	index     int
+	bytes     int64
 }
 
 func (m *MockExecutor) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
@@ -87,10 +108,99 @@ func (m *MockExecutor) Execute(ctx context.Context, request ExecutionRequest) (E
 		case "status":
 			result.Update.ServiceStatus = request.Server.ServiceStatus
 		}
-	case "user-add", "user-update", "user-delete":
+	case "user-add", "user-update", "user-delete", "policy-apply", "traffic":
 		result.Message = "Proxy user synchronization succeeded"
+		result.Update.Traffic = m.simulateNode(request.Server.ID, request.Task)
+		if request.Task.Action == "traffic" {
+			// Background collection only reports usage.
+			result.Update = ExecutionUpdate{Traffic: result.Update.Traffic}
+		}
 	}
 	return result, nil
+}
+
+// simulateNode applies an account or policy operation to the in-memory node
+// and returns the node's traffic report.
+func (m *MockExecutor) simulateNode(serverID string, task TargetTask) *TrafficReport {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.nodes == nil {
+		m.nodes = make(map[string]*mockNode)
+	}
+	node := m.nodes[serverID]
+	if node == nil {
+		node = &mockNode{accounts: make(map[string]*mockAccount), nextIndex: 1}
+		m.nodes[serverID] = node
+	}
+	removed := make([]TrafficEntry, 0)
+	switch task.Action {
+	case "user-add":
+		account := node.accounts[task.Username]
+		if account == nil {
+			account = &mockAccount{}
+			node.accounts[task.Username] = account
+		}
+		node.applyPolicy(account, task.Policy)
+	case "user-update":
+		account := node.accounts[task.OldUsername]
+		if account == nil {
+			account = node.accounts[task.Username]
+		}
+		if account == nil {
+			account = &mockAccount{}
+		}
+		delete(node.accounts, task.OldUsername)
+		node.accounts[task.Username] = account
+		node.applyPolicy(account, task.Policy)
+	case "user-delete":
+		if account := node.accounts[task.Username]; account != nil {
+			if account.hasPolicy {
+				removed = append(removed, TrafficEntry{
+					Username: task.Username, State: NodeStateRemoved, CapMB: account.capMB,
+					Period: account.period, Index: account.index, Bytes: account.bytes,
+				})
+			}
+			delete(node.accounts, task.Username)
+		}
+	case "policy-apply":
+		for index := range task.Policies {
+			if account := node.accounts[task.Policies[index].Username]; account != nil {
+				node.applyPolicy(account, &task.Policies[index])
+			}
+		}
+	case "traffic":
+		for _, account := range node.accounts {
+			if account.hasPolicy && account.state == NodeStateEnabled && m.SimulatedTrafficBytes > 0 {
+				account.bytes = min(account.bytes+m.SimulatedTrafficBytes, account.capMB*mebibyte)
+			}
+		}
+	}
+	report := &TrafficReport{ObservedAt: time.Now().UTC(), NodeUsers: []string{}, Entries: removed}
+	for username, account := range node.accounts {
+		report.NodeUsers = append(report.NodeUsers, username)
+		if account.hasPolicy {
+			report.Entries = append(report.Entries, TrafficEntry{
+				Username: username, State: account.state, CapMB: account.capMB,
+				Period: account.period, Index: account.index, Bytes: account.bytes,
+			})
+		}
+	}
+	return report
+}
+
+func (n *mockNode) applyPolicy(account *mockAccount, policy *NodePolicy) {
+	if policy == nil {
+		return
+	}
+	if !account.hasPolicy || account.period != policy.Period {
+		account.index = n.nextIndex
+		account.bytes = 0
+		n.nextIndex++
+	}
+	account.hasPolicy = true
+	account.state = policy.State
+	account.capMB = policy.CapMB
+	account.period = policy.Period
 }
 
 func mockShouldFail(server Server, action string) bool {
@@ -112,6 +222,14 @@ type SSHExecutor struct {
 	ConnectTimeout time.Duration
 	CommandTimeout time.Duration
 }
+
+// hostKeyPinning is implemented by executors that authenticate hosts by a
+// pinned host key enrolled on first use.
+type hostKeyPinning interface {
+	PinsHostKeys() bool
+}
+
+func (e *SSHExecutor) PinsHostKeys() bool { return true }
 
 func (e *SSHExecutor) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
 	script, err := os.ReadFile(e.ScriptPath)
@@ -159,7 +277,19 @@ func (e *SSHExecutor) Execute(ctx context.Context, request ExecutionRequest) (Ex
 		}, errors.New("uploaded installer does not implement the required --api command contract")
 	}
 
+	started := time.Now().UTC()
 	output, err := runRemoteTask(ctx, client, remotePath, request, e.CommandTimeout)
+	// A lock-free traffic collection may read the node at any point while it
+	// runs, so it is dated at its start; account and policy commands print the
+	// report after their change and are dated at their end. A collection that
+	// overlapped a change therefore never overrides the change's own report.
+	observedAt := time.Now().UTC()
+	if request.Task.Action == "traffic" {
+		observedAt = started
+	}
+	// Parse the traffic report before redaction: a numeric password could
+	// otherwise corrupt byte counters.
+	traffic := parseTrafficReport(output, observedAt)
 	output = redactSecrets(output, request.Password)
 	if err != nil {
 		return ExecutionResult{Update: connectedUpdate},
@@ -170,6 +300,7 @@ func (e *SSHExecutor) Execute(ctx context.Context, request ExecutionRequest) (Ex
 		Update: ExecutionUpdate{
 			HostFingerprint: observedFingerprint,
 			ServerStatus:    "online",
+			Traffic:         traffic,
 		},
 	}
 	applyRemoteResult(&result, request, output)
@@ -386,18 +517,39 @@ func remoteArguments(path string, request ExecutionRequest) ([]string, string, e
 			strconv.Itoa(request.Task.HTTPPort), strconv.Itoa(request.Task.SocksPort), dns[0], dns[1])
 	case "user-add":
 		arguments = append(arguments, "user-add", request.Task.Username)
-		stdin = request.Password + "\n"
+		stdin = request.Password + "\n" + policyLine(request.Task.Policy)
 	case "user-update":
 		arguments = append(arguments, "user-update", request.Task.OldUsername, request.Task.Username)
-		stdin = request.Password + "\n"
+		stdin = request.Password + "\n" + policyLine(request.Task.Policy)
 	case "user-delete":
 		arguments = append(arguments, "user-delete", request.Task.Username)
+	case "policy-apply":
+		arguments = append(arguments, "policy-apply")
+		var lines strings.Builder
+		for _, policy := range request.Task.Policies {
+			if !usernamePattern.MatchString(policy.Username) {
+				return nil, "", errors.New("policy contains an invalid username")
+			}
+			lines.WriteString(policy.Username + " " + policyLine(&policy))
+		}
+		stdin = lines.String()
+	case "traffic":
+		arguments = append(arguments, "traffic")
 	case "service":
 		arguments = append(arguments, "service", request.Task.ServiceAction)
 	default:
 		return nil, "", errors.New("unsupported remote operation")
 	}
 	return arguments, stdin, nil
+}
+
+// policyLine renders "STATE CAP_MB PERIOD\n", or nothing when no policy is
+// known (the node then keeps the account's current policy).
+func policyLine(policy *NodePolicy) string {
+	if policy == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s %d %d\n", policy.State, policy.CapMB, policy.Period)
 }
 
 func runSSHCommand(ctx context.Context, client *ssh.Client, command, stdin string, timeout time.Duration) (string, error) {

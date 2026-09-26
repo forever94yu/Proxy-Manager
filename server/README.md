@@ -37,7 +37,8 @@ go -C server run .
 
 Other useful settings are `HTTP_ADDR`, `DB_PATH`, `ADMIN_USERNAME`,
 `SESSION_TTL`, `COOKIE_SECURE`, `WORKER_CONCURRENCY`, `WORKER_POLL_INTERVAL`,
-`SSH_TIMEOUT`, `COMMAND_TIMEOUT`, `INSTALL_SCRIPT_PATH`, `STATIC_DIR`, and
+`SSH_TIMEOUT`, `COMMAND_TIMEOUT`, `TRAFFIC_SYNC_INTERVAL` (default `5m`),
+`TRAFFIC_RECONCILE_INTERVAL` (default `30s`), `INSTALL_SCRIPT_PATH`, `STATIC_DIR`, and
 `CORS_ORIGINS` (comma-separated exact origins). `TRUSTED_PROXY_CIDRS` accepts a
 comma-separated set of reverse-proxy addresses or CIDRs; only those peers may
 supply `X-Forwarded-For` for login rate limiting or `X-Forwarded-Proto` for
@@ -60,11 +61,20 @@ The repository installer must expose the machine interface used by the worker:
 ```text
 --api inspect
 --api deploy IP HTTP_PORT SOCKS_PORT DNS1 DNS2
---api user-add NAME                 # password on stdin
---api user-update OLD_NAME NEW_NAME # password on stdin
+--api user-add NAME                 # password, optional "STATE CAP_MB PERIOD" on stdin
+--api user-update OLD_NAME NEW_NAME # password, optional "STATE CAP_MB PERIOD" on stdin
 --api user-delete NAME
+--api policy-apply                  # "NAME STATE CAP_MB PERIOD" lines on stdin
+--api traffic                       # read-only traffic report
 --api service status|start|stop|restart
 ```
+
+Traffic quotas are enforced on the nodes by 3proxy `countall` counters. A
+background loop collects the counters every `TRAFFIC_SYNC_INTERVAL` without
+creating jobs; another loop starts periodic resets and queues `user_policy`
+jobs when a user expires, runs out of quota or the node state drifts. Policies
+are resolved from the database right before a job runs, so queued and retried
+jobs always apply the latest settings.
 
 When the script does not expose that contract, SSH jobs fail explicitly after
 upload instead of trying to drive its interactive menu.

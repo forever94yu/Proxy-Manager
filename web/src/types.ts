@@ -29,6 +29,10 @@ export interface Server {
   userCount?: number
   lastSeenAt?: string
   tags?: string[]
+  /** Last successful traffic collection. */
+  trafficSyncedAt?: string
+  /** Error of the last traffic collection; absent when it succeeded. */
+  trafficError?: string
 }
 
 export type AuthMethod = 'key' | 'password'
@@ -56,6 +60,10 @@ export interface BulkServiceActionInput extends BulkServerActionInput {
 
 export type UserSyncStatus = 'synced' | 'pending' | 'partial' | 'failed'
 export type PasswordMode = 'generated' | 'custom' | 'unchanged'
+/** Derived by the server: disabled (manual) > expired > exhausted > active. */
+export type ProxyUserStatus = 'active' | 'disabled' | 'expired' | 'exhausted'
+export type ResetPeriod = 'none' | 'daily' | 'weekly' | 'monthly'
+export type PeriodicResetPeriod = Exclude<ResetPeriod, 'none'>
 
 export interface ProxyUser {
   id: string
@@ -63,6 +71,21 @@ export interface ProxyUser {
   serverIds?: string[]
   serverCount?: number
   syncStatus: UserSyncStatus
+  enabled: boolean
+  status: ProxyUserStatus
+  /** 0 = unlimited. */
+  trafficLimitBytes: number
+  /** Usage of the current period summed across servers. */
+  trafficUsedBytes: number
+  trafficUpdatedAt?: string
+  /** Absent = never expires. */
+  expiresAt?: string
+  resetPeriod: ResetPeriod
+  /** Present when resetPeriod is not 'none'. */
+  resetAnchor?: string
+  periodStartedAt?: string
+  nextResetAt?: string
+  lastResetAt?: string
   createdAt?: string
   updatedAt?: string
 }
@@ -72,6 +95,14 @@ export interface ProxyUserInput {
   passwordMode: PasswordMode
   password?: string
   serverIds: string[]
+  enabled: boolean
+  /** Integer bytes, 0 = unlimited, max 1 PiB. */
+  trafficLimitBytes: number
+  /** '' = never expires; otherwise RFC 3339 with the local UTC offset. */
+  expiresAt: string
+  resetPeriod: ResetPeriod
+  /** '' when resetPeriod is 'none'; otherwise RFC 3339 with the local UTC offset. */
+  resetAnchor: string
 }
 
 export type JobStatus =
@@ -87,6 +118,10 @@ export type JobType =
   | 'user_create'
   | 'user_update'
   | 'user_delete'
+  | 'user_policy'
+  | 'user_traffic_reset'
+  | 'user_enable'
+  | 'user_disable'
   | 'service_start'
   | 'service_stop'
   | 'service_restart'

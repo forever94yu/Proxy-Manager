@@ -23,6 +23,10 @@ const labels: Record<string, string> = {
   succeeded: '已完成',
   partially_failed: '部分失败',
   cancelled: '已取消',
+  active: '正常',
+  disabled: '已停用',
+  expired: '已到期',
+  exhausted: '流量用尽',
 }
 
 const tones: Record<string, string> = {
@@ -31,6 +35,7 @@ const tones: Record<string, string> = {
   installed: 'success',
   synced: 'success',
   succeeded: 'success',
+  active: 'success',
   deploying: 'info',
   pending: 'info',
   queued: 'neutral',
@@ -38,10 +43,13 @@ const tones: Record<string, string> = {
   stopped: 'neutral',
   not_installed: 'neutral',
   cancelled: 'neutral',
+  disabled: 'neutral',
   partial: 'warning',
   partially_failed: 'warning',
+  expired: 'warning',
   offline: 'danger',
   failed: 'danger',
+  exhausted: 'danger',
 }
 
 const label = computed(() => labels[props.status] || props.status)

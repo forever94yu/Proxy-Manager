@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -171,6 +172,91 @@ func validateUserInput(input *UserInput, creating bool) FieldErrors {
 			break
 		}
 	}
+	validateUsageInput(input, fields)
+	return fields
+}
+
+// validateUsageInput checks the optional usage limit fields. Omitted fields are
+// valid; applyUsageInput resolves them.
+func validateUsageInput(input *UserInput, fields FieldErrors) {
+	if input.TrafficLimitBytes != nil && (*input.TrafficLimitBytes < 0 || *input.TrafficLimitBytes > MaxTrafficLimitBytes) {
+		fields["trafficLimitBytes"] = "Traffic limit must be between 0 and 1 PiB"
+	}
+	if input.ExpiresAt != nil {
+		trimmed := strings.TrimSpace(*input.ExpiresAt)
+		input.ExpiresAt = &trimmed
+		if trimmed != "" {
+			if _, err := parseUsageTime(trimmed); err != nil {
+				fields["expiresAt"] = "Expiry time must be an RFC 3339 timestamp"
+			}
+		}
+	}
+	if input.ResetPeriod != nil && !validResetPeriod(*input.ResetPeriod) {
+		fields["resetPeriod"] = "Reset period must be none, daily, weekly, or monthly"
+	}
+	if input.ResetAnchor != nil {
+		trimmed := strings.TrimSpace(*input.ResetAnchor)
+		input.ResetAnchor = &trimmed
+		if trimmed != "" {
+			if _, err := parseUsageTime(trimmed); err != nil {
+				fields["resetAnchor"] = "Reset anchor must be an RFC 3339 timestamp"
+			}
+		}
+	}
+}
+
+// applyUsageInput copies the usage settings of the input onto the user. When
+// creating, omitted fields take the defaults (enabled, unlimited, permanent,
+// no periodic reset); when editing, they keep their current value. It returns
+// field errors that depend on the combination of old and new values.
+func applyUsageInput(user *ProxyUser, input UserInput, creating bool, now time.Time) FieldErrors {
+	fields := make(FieldErrors)
+	previousPeriod, previousAnchor, previousNext := user.ResetPeriod, user.ResetAnchor, user.NextResetAt
+	if creating {
+		user.Enabled = true
+		user.ResetPeriod = ResetNone
+	}
+	if input.Enabled != nil {
+		user.Enabled = *input.Enabled
+	}
+	if input.TrafficLimitBytes != nil {
+		user.TrafficLimitBytes = *input.TrafficLimitBytes
+	}
+	if input.ExpiresAt != nil {
+		user.ExpiresAt = nil
+		if *input.ExpiresAt != "" {
+			expiresAt, _ := parseUsageTime(*input.ExpiresAt)
+			expiresAt = expiresAt.UTC()
+			user.ExpiresAt = &expiresAt
+		}
+	}
+	if input.ResetPeriod != nil {
+		user.ResetPeriod = *input.ResetPeriod
+	}
+	if input.ResetAnchor != nil {
+		user.ResetAnchor = *input.ResetAnchor
+	}
+	if user.ResetPeriod == ResetNone {
+		user.ResetAnchor = ""
+		user.NextResetAt = nil
+		return fields
+	}
+	if user.ResetAnchor == "" {
+		fields["resetAnchor"] = "Reset anchor is required for periodic resets"
+		return fields
+	}
+	anchor, err := parseUsageTime(user.ResetAnchor)
+	if err != nil {
+		fields["resetAnchor"] = "Reset anchor must be an RFC 3339 timestamp"
+		return fields
+	}
+	user.ResetAnchor = formatAnchor(anchor)
+	if !creating && previousNext != nil && previousPeriod == user.ResetPeriod && previousAnchor == user.ResetAnchor {
+		// Unchanged schedule: keep a reset that may be due but not processed yet.
+		return fields
+	}
+	next := nextResetBoundary(user.ResetPeriod, anchor, now).UTC()
+	user.NextResetAt = &next
 	return fields
 }
 

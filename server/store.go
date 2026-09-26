@@ -60,6 +60,7 @@ type ExecutionUpdate struct {
 	OS              string
 	Version         string
 	PublicIP        string
+	Traffic         *TrafficReport
 }
 
 func OpenStore(path string) (*Store, error) {
@@ -162,7 +163,8 @@ SELECT s.id, s.name, s.host, s.ssh_port, s.ssh_user, s.auth_method,
        s.install_status, s.os, s.version, s.public_ip, s.http_port, s.socks_port,
        s.dns_json, s.tags_json, s.last_seen_at, s.created_at, s.updated_at,
 	   COALESCE(s.remote_user_count, (SELECT COUNT(*) FROM proxy_user_servers pus WHERE pus.server_id = s.id)),
-       (SELECT COUNT(*) FROM proxy_user_servers pus WHERE pus.server_id = s.id)
+       (SELECT COUNT(*) FROM proxy_user_servers pus WHERE pus.server_id = s.id),
+       s.traffic_synced_at, s.traffic_error
 FROM servers s`
 
 func (s *Store) ListServers(ctx context.Context, search, status string) ([]Server, error) {
@@ -321,7 +323,7 @@ UPDATE servers SET install_status = ?, updated_at = ? WHERE id = ?`, status, for
 func scanServer(scanner interface{ Scan(...any) error }) (Server, error) {
 	var server Server
 	var dnsJSON, tagsJSON string
-	var lastSeen sql.NullString
+	var lastSeen, trafficSyncedAt sql.NullString
 	var createdAt, updatedAt string
 	err := scanner.Scan(
 		&server.ID, &server.Name, &server.Host, &server.SSHPort, &server.SSHUser,
@@ -329,6 +331,7 @@ func scanServer(scanner interface{ Scan(...any) error }) (Server, error) {
 		&server.Status, &server.ServiceStatus, &server.InstallStatus, &server.OS,
 		&server.Version, &server.PublicIP, &server.HTTPPort, &server.SocksPort,
 		&dnsJSON, &tagsJSON, &lastSeen, &createdAt, &updatedAt, &server.UserCount, &server.DesiredUserCount,
+		&trafficSyncedAt, &server.TrafficError,
 	)
 	if err != nil {
 		return Server{}, err
@@ -354,6 +357,9 @@ func scanServer(scanner interface{ Scan(...any) error }) (Server, error) {
 		}
 		server.LastSeenAt = &value
 	}
+	if server.TrafficSyncedAt, err = parseNullTime(trafficSyncedAt); err != nil {
+		return Server{}, err
+	}
 	if server.DNS == nil {
 		server.DNS = []string{}
 	}
@@ -363,20 +369,88 @@ func scanServer(scanner interface{ Scan(...any) error }) (Server, error) {
 	return server, nil
 }
 
-func (s *Store) ListProxyUsers(ctx context.Context, search, syncStatus string) ([]ProxyUser, error) {
-	query := `
-SELECT id, username, password_cipher, sync_status, created_at, updated_at
-FROM proxy_users WHERE 1=1`
+// proxyUserColumns selects a user together with its usage in the current
+// accounting period (summed across servers) and the time of the most recent
+// traffic observation. The proxy_users table must be aliased as u.
+const proxyUserColumns = `
+u.id, u.username, u.password_cipher, u.sync_status, u.created_at, u.updated_at,
+u.enabled, u.traffic_limit_bytes, u.expires_at, u.reset_period, u.reset_anchor,
+u.period_token, u.period_started_at, u.next_reset_at, u.last_reset_at,
+COALESCE((SELECT SUM(ut.retained_bytes + ut.counter_bytes) FROM proxy_user_traffic ut
+          WHERE ut.user_id = u.id AND ut.period_token = u.period_token), 0),
+(SELECT MAX(ut.observed_at) FROM proxy_user_traffic ut WHERE ut.user_id = u.id)`
+
+// proxyUserRow holds the raw values of proxyUserColumns so the columns can be
+// combined with others in one scan.
+type proxyUserRow struct {
+	user             ProxyUser
+	createdAt        string
+	updatedAt        string
+	enabled          int
+	expiresAt        sql.NullString
+	periodStartedAt  sql.NullString
+	nextResetAt      sql.NullString
+	lastResetAt      sql.NullString
+	trafficUpdatedAt sql.NullString
+}
+
+func (r *proxyUserRow) targets() []any {
+	return []any{
+		&r.user.ID, &r.user.Username, &r.user.PasswordCipher, &r.user.SyncStatus, &r.createdAt, &r.updatedAt,
+		&r.enabled, &r.user.TrafficLimitBytes, &r.expiresAt, &r.user.ResetPeriod, &r.user.ResetAnchor,
+		&r.user.PeriodToken, &r.periodStartedAt, &r.nextResetAt, &r.lastResetAt,
+		&r.user.TrafficUsedBytes, &r.trafficUpdatedAt,
+	}
+}
+
+func (r *proxyUserRow) finish(now time.Time) (ProxyUser, error) {
+	user := r.user
+	var err error
+	if user.CreatedAt, err = parseTime(r.createdAt); err != nil {
+		return ProxyUser{}, err
+	}
+	if user.UpdatedAt, err = parseTime(r.updatedAt); err != nil {
+		return ProxyUser{}, err
+	}
+	for _, field := range []struct {
+		raw         sql.NullString
+		destination **time.Time
+	}{
+		{r.expiresAt, &user.ExpiresAt},
+		{r.periodStartedAt, &user.PeriodStartedAt},
+		{r.nextResetAt, &user.NextResetAt},
+		{r.lastResetAt, &user.LastResetAt},
+		{r.trafficUpdatedAt, &user.TrafficUpdatedAt},
+	} {
+		if *field.destination, err = parseNullTime(field.raw); err != nil {
+			return ProxyUser{}, err
+		}
+	}
+	user.Enabled = r.enabled != 0
+	user.Status = deriveUserStatus(user, now)
+	return user, nil
+}
+
+func scanProxyUser(scanner interface{ Scan(...any) error }) (ProxyUser, error) {
+	var row proxyUserRow
+	if err := scanner.Scan(row.targets()...); err != nil {
+		return ProxyUser{}, err
+	}
+	return row.finish(time.Now())
+}
+
+func (s *Store) ListProxyUsers(ctx context.Context, search, syncStatus, status string) ([]ProxyUser, error) {
+	query := "SELECT " + proxyUserColumns + " FROM proxy_users u WHERE 1=1"
 	args := make([]any, 0, 2)
 	if search != "" {
-		query += " AND username LIKE ? ESCAPE '\\'"
+		query += " AND u.username LIKE ? ESCAPE '\\'"
 		args = append(args, "%"+escapeLike(search)+"%")
 	}
 	if syncStatus != "" {
-		query += " AND sync_status = ?"
+		query += " AND u.sync_status = ?"
 		args = append(args, syncStatus)
 	}
-	query += " ORDER BY username COLLATE NOCASE"
+	query += " ORDER BY u.username COLLATE NOCASE"
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list proxy users: %w", err)
@@ -384,18 +458,13 @@ FROM proxy_users WHERE 1=1`
 	defer rows.Close()
 	users := make([]ProxyUser, 0)
 	for rows.Next() {
-		var user ProxyUser
-		var createdAt, updatedAt string
-		if err := rows.Scan(&user.ID, &user.Username, &user.PasswordCipher, &user.SyncStatus, &createdAt, &updatedAt); err != nil {
-			return nil, err
-		}
-		user.CreatedAt, err = parseTime(createdAt)
+		user, err := scanProxyUser(rows)
 		if err != nil {
 			return nil, err
 		}
-		user.UpdatedAt, err = parseTime(updatedAt)
-		if err != nil {
-			return nil, err
+		// The status depends on the current time, so it is filtered here.
+		if status != "" && user.Status != status {
+			continue
 		}
 		users = append(users, user)
 	}
@@ -416,25 +485,12 @@ FROM proxy_users WHERE 1=1`
 }
 
 func (s *Store) GetProxyUser(ctx context.Context, id string) (ProxyUser, error) {
-	var user ProxyUser
-	var createdAt, updatedAt string
-	err := s.db.QueryRowContext(ctx, `
-SELECT id, username, password_cipher, sync_status, created_at, updated_at
-FROM proxy_users WHERE id = ?`, id).Scan(
-		&user.ID, &user.Username, &user.PasswordCipher, &user.SyncStatus, &createdAt, &updatedAt)
+	user, err := scanProxyUser(s.db.QueryRowContext(ctx, "SELECT "+proxyUserColumns+" FROM proxy_users u WHERE u.id = ?", id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return ProxyUser{}, ErrNotFound
 	}
 	if err != nil {
 		return ProxyUser{}, fmt.Errorf("get proxy user: %w", err)
-	}
-	user.CreatedAt, err = parseTime(createdAt)
-	if err != nil {
-		return ProxyUser{}, err
-	}
-	user.UpdatedAt, err = parseTime(updatedAt)
-	if err != nil {
-		return ProxyUser{}, err
 	}
 	user.ServerIDs, err = s.userServerIDs(ctx, id)
 	if err != nil {
@@ -469,9 +525,14 @@ func (s *Store) CreateProxyUser(ctx context.Context, user ProxyUser, job NewJob)
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `
-INSERT INTO proxy_users(id, username, password_cipher, sync_status, created_at, updated_at)
-VALUES (?, ?, ?, 'pending', ?, ?)`, user.ID, user.Username, user.PasswordCipher,
-		formatTime(user.CreatedAt), formatTime(user.UpdatedAt))
+INSERT INTO proxy_users(
+    id, username, password_cipher, sync_status, created_at, updated_at,
+    enabled, traffic_limit_bytes, expires_at, reset_period, reset_anchor,
+    period_token, period_started_at, next_reset_at
+) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+		user.ID, user.Username, user.PasswordCipher, formatTime(user.CreatedAt), formatTime(user.UpdatedAt),
+		boolInt(user.Enabled), user.TrafficLimitBytes, nullTime(user.ExpiresAt), user.ResetPeriod, user.ResetAnchor,
+		formatTime(user.CreatedAt), nullTime(user.NextResetAt))
 	if isSQLiteUniqueError(err) {
 		return ErrConflict
 	}
@@ -493,6 +554,8 @@ INSERT INTO proxy_user_servers(user_id, server_id) VALUES (?, ?)`, user.ID, serv
 	return tx.Commit()
 }
 
+// UpdateProxyUser replaces the credentials, bindings and usage settings of a
+// user. The accounting period, and therefore the recorded usage, is kept.
 func (s *Store) UpdateProxyUser(ctx context.Context, user ProxyUser, expectedUpdatedAt time.Time, job NewJob) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -500,9 +563,13 @@ func (s *Store) UpdateProxyUser(ctx context.Context, user ProxyUser, expectedUpd
 	}
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `
-UPDATE proxy_users SET username = ?, password_cipher = ?, sync_status = 'pending', updated_at = ?
+UPDATE proxy_users SET
+    username = ?, password_cipher = ?, sync_status = 'pending', updated_at = ?,
+    enabled = ?, traffic_limit_bytes = ?, expires_at = ?, reset_period = ?, reset_anchor = ?, next_reset_at = ?
 WHERE id = ? AND updated_at = ?`,
-		user.Username, user.PasswordCipher, formatTime(user.UpdatedAt), user.ID, formatTime(expectedUpdatedAt))
+		user.Username, user.PasswordCipher, formatTime(user.UpdatedAt),
+		boolInt(user.Enabled), user.TrafficLimitBytes, nullTime(user.ExpiresAt), user.ResetPeriod, user.ResetAnchor,
+		nullTime(user.NextResetAt), user.ID, formatTime(expectedUpdatedAt))
 	if isSQLiteUniqueError(err) {
 		return ErrConflict
 	}
@@ -526,6 +593,48 @@ INSERT INTO proxy_user_servers(user_id, server_id) VALUES (?, ?)`, user.ID, serv
 	}
 	if err := insertJobTx(ctx, tx, job); err != nil {
 		return err
+	}
+	return tx.Commit()
+}
+
+// ResetProxyUserTraffic starts a new accounting period now. The reset schedule
+// keeps its phase, so next_reset_at is unchanged. job is nil when the user is
+// not bound to any server.
+func (s *Store) ResetProxyUserTraffic(ctx context.Context, id string, expectedUpdatedAt, now time.Time, job *NewJob) error {
+	return s.mutateProxyUser(ctx, id, expectedUpdatedAt, now, job,
+		"period_token = period_token + 1, period_started_at = ?, last_reset_at = ?",
+		formatTime(now), formatTime(now))
+}
+
+// SetProxyUserEnabled switches the manual enable flag. job is nil when the
+// user is not bound to any server.
+func (s *Store) SetProxyUserEnabled(ctx context.Context, id string, enabled bool, expectedUpdatedAt, now time.Time, job *NewJob) error {
+	return s.mutateProxyUser(ctx, id, expectedUpdatedAt, now, job, "enabled = ?", boolInt(enabled))
+}
+
+func (s *Store) mutateProxyUser(ctx context.Context, id string, expectedUpdatedAt, now time.Time, job *NewJob, assignments string, args ...any) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	syncStatus := "sync_status"
+	if job != nil {
+		syncStatus = "'pending'"
+	}
+	query := "UPDATE proxy_users SET " + assignments + ", sync_status = " + syncStatus +
+		", updated_at = ? WHERE id = ? AND updated_at = ?"
+	result, err := tx.ExecContext(ctx, query, append(args, formatTime(now), id, formatTime(expectedUpdatedAt))...)
+	if err != nil {
+		return fmt.Errorf("update proxy user: %w", err)
+	}
+	if err := classifyConditionalUserTx(ctx, tx, result, id); err != nil {
+		return err
+	}
+	if job != nil {
+		if err := insertJobTx(ctx, tx, *job); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -794,16 +903,22 @@ SELECT rowid, type, status, entity_type, entity_id FROM jobs WHERE id = ?`, id).
 	if status != "failed" && status != "partially_failed" {
 		return Job{}, ErrConflict
 	}
+	// Policy synchronizations always apply the latest desired state when they
+	// run, so a later job cannot make their retry stale. Conversely, system
+	// policy synchronizations do not supersede account changes.
 	var newerTargets int
-	if err := tx.QueryRowContext(ctx, `
+	if !isPolicyJobType(jobType) {
+		if err := tx.QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM job_targets original
 JOIN job_targets newer_target ON newer_target.server_id = original.server_id
 JOIN jobs newer_job ON newer_job.id = newer_target.job_id
 WHERE original.job_id = ?
   AND original.status = 'failed'
-  AND newer_job.rowid > ?`, id, rowID).Scan(&newerTargets); err != nil {
-		return Job{}, err
+  AND newer_job.rowid > ?
+  AND newer_job.type <> 'user_policy'`, id, rowID).Scan(&newerTargets); err != nil {
+			return Job{}, err
+		}
 	}
 	if newerTargets > 0 {
 		return Job{}, ErrConflict
@@ -1094,7 +1209,10 @@ WHERE id = ?`,
 			update.InstallStatus, update.InstallStatus,
 			update.OS, update.OS, update.Version, update.Version,
 			update.PublicIP, update.PublicIP, now, now, serverID)
-		return err
+		if err != nil || update.Traffic == nil {
+			return err
+		}
+		return applyTrafficReportTx(ctx, tx, serverID, update.Traffic)
 	}
 	_, err := tx.ExecContext(ctx, `
 UPDATE servers SET
@@ -1257,4 +1375,29 @@ func parseTime(value string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("parse database timestamp: %w", err)
 	}
 	return parsed, nil
+}
+
+func parseNullTime(value sql.NullString) (*time.Time, error) {
+	if !value.Valid || value.String == "" {
+		return nil, nil
+	}
+	parsed, err := parseTime(value.String)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
+}
+
+func nullTime(value *time.Time) any {
+	if value == nil {
+		return nil
+	}
+	return formatTime(*value)
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }

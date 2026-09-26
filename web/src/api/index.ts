@@ -91,7 +91,7 @@ export const serversApi = {
 }
 
 export const usersApi = {
-  async list(filters: { search?: string; syncStatus?: string } = {}): Promise<ProxyUser[]> {
+  async list(filters: { search?: string; syncStatus?: string; status?: string } = {}): Promise<ProxyUser[]> {
     const payload = await apiRequest<ListPayload<ProxyUser>>(`/users${queryString(filters)}`)
     return normalizeList(payload)
   },
@@ -103,6 +103,13 @@ export const usersApi = {
   },
   async remove(id: string): Promise<UserMutationResult> {
     return normalizeUserMutation(await apiRequest<UserMutationResult | undefined>(`/users/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+  },
+  /** Clears current-period usage; `job` is absent when the user has no servers. */
+  async resetTraffic(id: string): Promise<UserMutationResult> {
+    return normalizeUserMutation(await apiRequest<UserResponse | undefined>(`/users/${encodeURIComponent(id)}/traffic/reset`, { method: 'POST', body: {} }))
+  },
+  async setEnabled(id: string, enabled: boolean): Promise<UserMutationResult> {
+    return normalizeUserMutation(await apiRequest<UserResponse | undefined>(`/users/${encodeURIComponent(id)}/state`, { method: 'POST', body: { enabled } }))
   },
 }
 

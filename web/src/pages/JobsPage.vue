@@ -39,6 +39,10 @@ const jobLabels: Record<string, string> = {
   user_create: '创建代理用户',
   user_update: '更新代理用户',
   user_delete: '删除代理用户',
+  user_policy: '同步用户策略',
+  user_traffic_reset: '重置流量',
+  user_enable: '启用代理用户',
+  user_disable: '停用代理用户',
   service_start: '启动服务',
   service_stop: '停止服务',
   service_restart: '重启服务',
@@ -153,6 +157,10 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer))
             <option value="user_create">创建代理用户</option>
             <option value="user_update">更新代理用户</option>
             <option value="user_delete">删除代理用户</option>
+            <option value="user_policy">同步用户策略</option>
+            <option value="user_traffic_reset">重置流量</option>
+            <option value="user_enable">启用代理用户</option>
+            <option value="user_disable">停用代理用户</option>
           </select>
           <select v-model="status" class="filter-select" aria-label="任务状态筛选">
             <option value="">全部状态</option>
@@ -191,7 +199,7 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer))
               <td class="hide-mobile">
                 <span class="target-result"><b class="result-success">{{ job.successCount || 0 }}</b> / {{ job.targetCount || 0 }}<b v-if="job.failedCount" class="result-failed">{{ job.failedCount }} 失败</b></span>
               </td>
-              <td class="hide-tablet">{{ job.actor || '系统' }}</td>
+              <td class="hide-tablet">{{ job.actor === 'system' || !job.actor ? '系统' : job.actor }}</td>
               <td><span :title="formatDateTime(job.createdAt)">{{ formatRelativeTime(job.createdAt) }}</span></td>
               <td>
                 <div class="row-actions">
@@ -235,7 +243,7 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer))
           <div><dt>成功</dt><dd class="result-success">{{ selectedJob.successCount || 0 }}</dd></div>
           <div><dt>失败</dt><dd :class="{ 'result-failed': selectedJob.failedCount }">{{ selectedJob.failedCount || 0 }}</dd></div>
           <div><dt>执行耗时</dt><dd>{{ duration(selectedJob) }}</dd></div>
-          <div><dt>操作者</dt><dd>{{ selectedJob.actor || '系统' }}</dd></div>
+          <div><dt>操作者</dt><dd>{{ selectedJob.actor === 'system' || !selectedJob.actor ? '系统' : selectedJob.actor }}</dd></div>
           <div><dt>创建时间</dt><dd>{{ formatDateTime(selectedJob.createdAt) }}</dd></div>
           <div><dt>开始时间</dt><dd>{{ formatDateTime(selectedJob.startedAt) }}</dd></div>
           <div><dt>完成时间</dt><dd>{{ formatDateTime(selectedJob.finishedAt) }}</dd></div>

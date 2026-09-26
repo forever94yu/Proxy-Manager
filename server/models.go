@@ -32,19 +32,36 @@ type Server struct {
 	DesiredUserCount int        `json:"-"`
 	LastSeenAt       *time.Time `json:"lastSeenAt,omitempty"`
 	Tags             []string   `json:"tags"`
+	TrafficSyncedAt  *time.Time `json:"trafficSyncedAt,omitempty"`
+	TrafficError     string     `json:"trafficError,omitempty"`
 	CreatedAt        time.Time  `json:"-"`
 	UpdatedAt        time.Time  `json:"-"`
 }
 
 type ProxyUser struct {
-	ID             string    `json:"id"`
-	Username       string    `json:"username"`
-	PasswordCipher string    `json:"-"`
-	ServerIDs      []string  `json:"serverIds"`
-	ServerCount    int       `json:"serverCount"`
-	SyncStatus     string    `json:"syncStatus"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	ID             string   `json:"id"`
+	Username       string   `json:"username"`
+	PasswordCipher string   `json:"-"`
+	ServerIDs      []string `json:"serverIds"`
+	ServerCount    int      `json:"serverCount"`
+	SyncStatus     string   `json:"syncStatus"`
+
+	// Usage limits. Status is derived: disabled > expired > exhausted > active.
+	Enabled           bool       `json:"enabled"`
+	Status            string     `json:"status"`
+	TrafficLimitBytes int64      `json:"trafficLimitBytes"`
+	TrafficUsedBytes  int64      `json:"trafficUsedBytes"`
+	TrafficUpdatedAt  *time.Time `json:"trafficUpdatedAt,omitempty"`
+	ExpiresAt         *time.Time `json:"expiresAt,omitempty"`
+	ResetPeriod       string     `json:"resetPeriod"`
+	ResetAnchor       string     `json:"resetAnchor,omitempty"`
+	PeriodToken       int64      `json:"-"`
+	PeriodStartedAt   *time.Time `json:"periodStartedAt,omitempty"`
+	NextResetAt       *time.Time `json:"nextResetAt,omitempty"`
+	LastResetAt       *time.Time `json:"lastResetAt,omitempty"`
+
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
 type Job struct {
@@ -96,6 +113,25 @@ type UserInput struct {
 	PasswordMode string   `json:"passwordMode"`
 	Password     string   `json:"password"`
 	ServerIDs    []string `json:"serverIds"`
+
+	// Usage limits are optional. Omitted fields keep their current value when
+	// editing and use the defaults (enabled, unlimited, permanent, no reset)
+	// when creating.
+	Enabled           *bool   `json:"enabled"`
+	TrafficLimitBytes *int64  `json:"trafficLimitBytes"`
+	ExpiresAt         *string `json:"expiresAt"`
+	ResetPeriod       *string `json:"resetPeriod"`
+	ResetAnchor       *string `json:"resetAnchor"`
+}
+
+// NodePolicy is the traffic policy of one proxy user on one node: whether the
+// account may authenticate, its node-local total traffic cap and the
+// accounting period whose counters the node must use.
+type NodePolicy struct {
+	Username string `json:"username"`
+	State    string `json:"state"`
+	CapMB    int64  `json:"capMb"`
+	Period   int64  `json:"period"`
 }
 
 type TargetTask struct {
@@ -108,6 +144,32 @@ type TargetTask struct {
 	SocksPort          int      `json:"socksPort,omitempty"`
 	DNS                []string `json:"dns,omitempty"`
 	ServiceAction      string   `json:"serviceAction,omitempty"`
+
+	// Policies are resolved by the worker immediately before execution, so a
+	// queued or retried job always applies the latest desired state. They are
+	// never persisted in job payloads.
+	Policy   *NodePolicy  `json:"-"`
+	Policies []NodePolicy `json:"-"`
+}
+
+// TrafficReport is a snapshot of the proxy users and traffic policies present
+// on a node. The installer prints one after every account or policy change and
+// for `--api traffic`.
+type TrafficReport struct {
+	ObservedAt time.Time
+	NodeUsers  []string
+	Entries    []TrafficEntry
+}
+
+type TrafficEntry struct {
+	Username string
+	// State is enabled, disabled, or removed (final counter value of a policy
+	// entry that was deleted together with the account).
+	State  string
+	CapMB  int64
+	Period int64
+	Index  int
+	Bytes  int64
 }
 
 type Dashboard struct {

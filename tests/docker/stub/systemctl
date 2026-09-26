@@ -52,15 +52,27 @@ stub_mark_inactive() {
 	stub_stop_proxy
 }
 
+stub_signal_proxy() {
+	local signal=$1 pid
+	[[ -f "${STUB_PID_FILE}" ]] || return 1
+	pid=$(<"${STUB_PID_FILE}")
+	kill -s "${signal}" "${pid}" 2>/dev/null
+}
+
 cmd="${1:-}"
 shift || true
 
 # Drop --quiet and unit name arguments for action parsing.
 args=()
+signal=""
 unit_seen=false
 for arg in "$@"; do
 	case "${arg}" in
 	--quiet | --no-pager)
+		continue
+		;;
+	--signal=*)
+		signal=${arg#--signal=}
 		continue
 		;;
 	3proxy | 3proxy.service)
@@ -77,6 +89,17 @@ done
 case "${cmd}" in
 daemon-reload | enable | disable)
 	exit 0
+	;;
+reload)
+	# Mirrors ExecReload=/bin/kill -USR1 $MAINPID.
+	stub_is_active || exit 1
+	stub_signal_proxy USR1
+	exit $?
+	;;
+kill)
+	stub_is_active || exit 1
+	stub_signal_proxy "${signal:-TERM}"
+	exit $?
 	;;
 start)
 	stub_mark_active

@@ -132,12 +132,37 @@ let servers: Server[] = [
   },
 ]
 
-let users: ProxyUser[] = [
-  { id: 'usr-001', username: 'crawler_cn', serverIds: ['srv-sh-01', 'srv-sh-02', 'srv-gz-01'], serverCount: 3, syncStatus: 'synced', createdAt: minutesAgo(43_200), updatedAt: minutesAgo(80) },
-  { id: 'usr-002', username: 'monitoring', serverIds: ['srv-sh-01', 'srv-sh-02', 'srv-gz-01', 'srv-hk-01'], serverCount: 4, syncStatus: 'partial', createdAt: minutesAgo(36_000), updatedAt: minutesAgo(38) },
-  { id: 'usr-003', username: 'qa_runner', serverIds: ['srv-test-01'], serverCount: 1, syncStatus: 'failed', createdAt: minutesAgo(12_000), updatedAt: minutesAgo(26) },
-  { id: 'usr-004', username: 'data_pipeline', serverIds: ['srv-sh-01', 'srv-sh-02'], serverCount: 2, syncStatus: 'synced', createdAt: minutesAgo(72_000), updatedAt: minutesAgo(1_440) },
-  { id: 'usr-005', username: 'vendor_api', serverIds: ['srv-gz-01'], serverCount: 1, syncStatus: 'pending', createdAt: minutesAgo(50), updatedAt: minutesAgo(8) },
+const GiB = 1024 ** 3
+const daysFromNow = (days: number) => new Date(now + days * 86_400_000).toISOString()
+
+type DemoUser = Omit<ProxyUser, 'status'>
+
+function nextBoundary(period: ProxyUser['resetPeriod'], anchor?: string): string | undefined {
+  if (period === 'none' || !anchor) return undefined
+  const boundary = new Date(anchor)
+  const step = (date: Date) => {
+    if (period === 'daily') date.setDate(date.getDate() + 1)
+    else if (period === 'weekly') date.setDate(date.getDate() + 7)
+    else date.setMonth(date.getMonth() + 1)
+  }
+  while (boundary.getTime() <= Date.now()) step(boundary)
+  return boundary.toISOString()
+}
+
+function withStatus(user: DemoUser): ProxyUser {
+  let status: ProxyUser['status'] = 'active'
+  if (!user.enabled) status = 'disabled'
+  else if (user.expiresAt && new Date(user.expiresAt).getTime() <= Date.now()) status = 'expired'
+  else if (user.trafficLimitBytes > 0 && user.trafficUsedBytes >= user.trafficLimitBytes) status = 'exhausted'
+  return { ...user, status }
+}
+
+let users: DemoUser[] = [
+  { id: 'usr-001', username: 'crawler_cn', serverIds: ['srv-sh-01', 'srv-sh-02', 'srv-gz-01'], serverCount: 3, syncStatus: 'synced', enabled: true, trafficLimitBytes: 500 * GiB, trafficUsedBytes: 212.4 * GiB, trafficUpdatedAt: minutesAgo(3), resetPeriod: 'monthly', resetAnchor: '2026-01-01T00:00:00+08:00', nextResetAt: nextBoundary('monthly', '2026-01-01T00:00:00+08:00'), periodStartedAt: minutesAgo(36_000), createdAt: minutesAgo(43_200), updatedAt: minutesAgo(80) },
+  { id: 'usr-002', username: 'monitoring', serverIds: ['srv-sh-01', 'srv-sh-02', 'srv-gz-01', 'srv-hk-01'], serverCount: 4, syncStatus: 'partial', enabled: true, trafficLimitBytes: 0, trafficUsedBytes: 18.2 * GiB, trafficUpdatedAt: minutesAgo(3), resetPeriod: 'none', createdAt: minutesAgo(36_000), updatedAt: minutesAgo(38) },
+  { id: 'usr-003', username: 'qa_runner', serverIds: ['srv-test-01'], serverCount: 1, syncStatus: 'failed', enabled: true, trafficLimitBytes: 20 * GiB, trafficUsedBytes: 20 * GiB, trafficUpdatedAt: minutesAgo(3), expiresAt: daysFromNow(2), resetPeriod: 'weekly', resetAnchor: '2026-03-02T09:00:00+08:00', nextResetAt: nextBoundary('weekly', '2026-03-02T09:00:00+08:00'), createdAt: minutesAgo(12_000), updatedAt: minutesAgo(26) },
+  { id: 'usr-004', username: 'data_pipeline', serverIds: ['srv-sh-01', 'srv-sh-02'], serverCount: 2, syncStatus: 'synced', enabled: true, trafficLimitBytes: 2048 * GiB, trafficUsedBytes: 1720 * GiB, trafficUpdatedAt: minutesAgo(3), expiresAt: daysFromNow(-1), resetPeriod: 'none', createdAt: minutesAgo(72_000), updatedAt: minutesAgo(1_440) },
+  { id: 'usr-005', username: 'vendor_api', serverIds: ['srv-gz-01'], serverCount: 1, syncStatus: 'pending', enabled: false, trafficLimitBytes: 50 * GiB, trafficUsedBytes: 3.1 * GiB, expiresAt: daysFromNow(90), resetPeriod: 'none', createdAt: minutesAgo(50), updatedAt: minutesAgo(8) },
 ]
 
 let jobs: Job[] = [
@@ -172,6 +197,18 @@ let jobs: Job[] = [
 
 function clone<T>(value: T): T {
   return structuredClone(value)
+}
+
+function usageFromInput(input: ProxyUserInput): Pick<DemoUser, 'enabled' | 'trafficLimitBytes' | 'expiresAt' | 'resetPeriod' | 'resetAnchor' | 'nextResetAt'> {
+  const periodic = input.resetPeriod !== 'none'
+  return {
+    enabled: input.enabled,
+    trafficLimitBytes: input.trafficLimitBytes,
+    expiresAt: input.expiresAt || undefined,
+    resetPeriod: input.resetPeriod,
+    resetAnchor: periodic ? input.resetAnchor : undefined,
+    nextResetAt: periodic ? nextBoundary(input.resetPeriod, input.resetAnchor) : undefined,
+  }
 }
 
 function uniqueId(prefix: string): string {
@@ -372,10 +409,12 @@ export async function demoRequest<T>(path: string, method: string, body?: unknow
   if (pathname === '/users' && method === 'GET') {
     const search = url.searchParams.get('search')?.toLowerCase() || ''
     const syncStatus = url.searchParams.get('syncStatus') || ''
-    const items = users.filter((user) => {
+    const status = url.searchParams.get('status') || ''
+    const items = users.map(withStatus).filter((user) => {
       const matchesSearch = !search || user.username.toLowerCase().includes(search)
-      const matchesStatus = !syncStatus || user.syncStatus === syncStatus
-      return matchesSearch && matchesStatus
+      const matchesSync = !syncStatus || user.syncStatus === syncStatus
+      const matchesStatus = !status || user.status === status
+      return matchesSearch && matchesSync && matchesStatus
     })
     return clone({ items, total: items.length }) as T
   }
@@ -383,21 +422,47 @@ export async function demoRequest<T>(path: string, method: string, body?: unknow
   if (pathname === '/users' && method === 'POST') {
     const input = body as ProxyUserInput
     if (users.some((user) => user.username === input.username)) throw new DemoApiError(409, '代理用户名已存在')
-    const user: ProxyUser = {
+    const user: DemoUser = {
       id: uniqueId('usr'),
       username: input.username,
       serverIds: input.serverIds,
       serverCount: input.serverIds.length,
       syncStatus: 'pending',
+      ...usageFromInput(input),
+      trafficUsedBytes: 0,
+      periodStartedAt: new Date().toISOString(),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     }
     users = [user, ...users]
     const job = createJob('user_create', input.serverIds.length, `正在分发账号 ${input.username}`)
     const result: UserMutationResult = {
-      user,
+      user: withStatus(user),
       job,
       generatedPassword: input.passwordMode === 'generated' ? randomPassword() : undefined,
+    }
+    return clone(result) as T
+  }
+
+  const userActionMatch = pathname.match(/^\/users\/([^/]+)\/(traffic\/reset|state)$/)
+  if (userActionMatch && method === 'POST') {
+    const index = users.findIndex((user) => user.id === decodeURIComponent(userActionMatch[1]))
+    if (index < 0) throw new DemoApiError(404, '代理用户不存在')
+    const user = users[index]
+    let jobType = 'user_traffic_reset'
+    if (userActionMatch[2] === 'state') {
+      const enabled = (body as { enabled?: boolean }).enabled
+      if (typeof enabled !== 'boolean') throw new DemoApiError(422, '代理用户状态参数无效')
+      users[index] = { ...user, enabled, updatedAt: new Date().toISOString() }
+      jobType = enabled ? 'user_enable' : 'user_disable'
+    } else {
+      const resetAt = new Date().toISOString()
+      users[index] = { ...user, trafficUsedBytes: 0, periodStartedAt: resetAt, lastResetAt: resetAt, updatedAt: resetAt }
+    }
+    const count = user.serverIds?.length || 0
+    const result: UserMutationResult = {
+      user: withStatus(users[index]),
+      job: count ? createJob(jobType, count, `正在同步 ${user.username} 的使用策略`) : undefined,
     }
     return clone(result) as T
   }
@@ -416,11 +481,12 @@ export async function demoRequest<T>(path: string, method: string, body?: unknow
         serverIds: input.serverIds,
         serverCount: input.serverIds.length,
         syncStatus: 'pending',
+        ...usageFromInput(input),
         updatedAt: new Date().toISOString(),
       }
       const job = createJob('user_update', input.serverIds.length, `正在更新账号 ${input.username}`)
       const result: UserMutationResult = {
-        user: users[index],
+        user: withStatus(users[index]),
         job,
         generatedPassword: input.passwordMode === 'generated' ? randomPassword() : undefined,
       }

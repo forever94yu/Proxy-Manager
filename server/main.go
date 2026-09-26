@@ -36,7 +36,8 @@ func main() {
 			ScriptPath: cfg.ScriptPath, ConnectTimeout: cfg.SSHTimeout, CommandTimeout: cfg.CommandTimeout,
 		}
 	} else {
-		executor = &MockExecutor{}
+		// Simulated usage lets the quota flow be exercised without nodes.
+		executor = &MockExecutor{SimulatedTrafficBytes: 32 << 20}
 	}
 	sessions := NewSessionManager(cfg)
 	worker := NewWorker(store, box, executor, cfg, logger)
@@ -46,6 +47,8 @@ func main() {
 		logger.Error("worker initialization failed", "error", err)
 		os.Exit(1)
 	}
+	traffic := NewTrafficManager(store, box, executor, worker, cfg, logger)
+	traffic.Start(ctx)
 	api := NewAPI(cfg, store, box, sessions, worker, logger)
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -77,4 +80,5 @@ func main() {
 		logger.Error("HTTP shutdown failed", "error", err)
 	}
 	worker.Wait()
+	traffic.Wait()
 }

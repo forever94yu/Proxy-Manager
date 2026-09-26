@@ -103,17 +103,13 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		}
 		return true, nil
 	}
-	credentialBytes, err := w.box.Decrypt(server.CredentialCipher, "server:"+server.ID+":credential")
+	credential, err := w.serverCredential(server)
 	if err != nil {
 		message := "Stored SSH credential cannot be decrypted"
 		if completeErr := w.completeTarget(ctx, *claimed, false, message, ExecutionUpdate{}); completeErr != nil {
 			return true, completeErr
 		}
 		return true, nil
-	}
-	credential := string(credentialBytes)
-	for index := range credentialBytes {
-		credentialBytes[index] = 0
 	}
 	var task TargetTask
 	decoderErr := json.Unmarshal([]byte(claimed.Target.Payload), &task)
@@ -123,6 +119,13 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 			return true, completeErr
 		}
 		return true, nil
+	}
+	if err := w.resolvePolicies(ctx, claimed.Job, server.ID, &task); err != nil {
+		message := "Proxy user policy could not be resolved"
+		if completeErr := w.completeTarget(ctx, *claimed, false, message, ExecutionUpdate{}); completeErr != nil {
+			return true, fmt.Errorf("resolve policy: %v; complete target: %w", err, completeErr)
+		}
+		return true, fmt.Errorf("resolve policy: %w", err)
 	}
 	password := ""
 	if task.PasswordCiphertext != "" {
@@ -162,6 +165,52 @@ func (w *Worker) ProcessOne(ctx context.Context) (bool, error) {
 		return true, fmt.Errorf("complete job target: %w", err)
 	}
 	return true, nil
+}
+
+func (w *Worker) serverCredential(server Server) (string, error) {
+	credentialBytes, err := w.box.Decrypt(server.CredentialCipher, "server:"+server.ID+":credential")
+	if err != nil {
+		return "", err
+	}
+	credential := string(credentialBytes)
+	for index := range credentialBytes {
+		credentialBytes[index] = 0
+	}
+	return credential, nil
+}
+
+// resolvePolicies attaches the traffic policies to account and policy tasks.
+// They are computed from the database right before execution, so a queued or
+// retried job never applies an outdated quota, state or accounting period.
+func (w *Worker) resolvePolicies(ctx context.Context, job Job, serverID string, task *TargetTask) error {
+	now := time.Now()
+	switch task.Action {
+	case "user-add", "user-update":
+		if job.EntityType != "proxy_user" || job.EntityID == "" {
+			return nil
+		}
+		input, ok, err := w.store.UserPolicyInput(ctx, job.EntityID, serverID, now)
+		if err != nil || !ok {
+			return err
+		}
+		if input.User.Username != task.Username {
+			// The user was renamed by a later edit whose own job converges the
+			// account; do not attach a policy to the stale name.
+			return nil
+		}
+		policy := desiredNodePolicy(input.User, input.Observed, now)
+		task.Policy = &policy
+	case "policy-apply":
+		inputs, err := w.store.ServerPolicyInputs(ctx, serverID, now)
+		if err != nil {
+			return err
+		}
+		task.Policies = make([]NodePolicy, 0, len(inputs))
+		for _, input := range inputs {
+			task.Policies = append(task.Policies, desiredNodePolicy(input.User, input.Observed, now))
+		}
+	}
+	return nil
 }
 
 func (w *Worker) completeTarget(ctx context.Context, claimed ClaimedTarget, success bool, message string, update ExecutionUpdate) error {

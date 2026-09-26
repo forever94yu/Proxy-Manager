@@ -41,7 +41,7 @@ func TestInMemoryStoreUsesOneSQLiteConnection(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	users, err := store.ListProxyUsers(ctx, "", "")
+	users, err := store.ListProxyUsers(ctx, "", "", "")
 	if err != nil {
 		t.Fatalf("query populated in-memory database: %v", err)
 	}

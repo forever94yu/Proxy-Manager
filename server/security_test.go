@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -118,6 +119,48 @@ func TestRemoteArgumentsKeepPasswordOutOfCommand(t *testing.T) {
 	}
 	if len(arguments) < 3 || arguments[0] != "sudo" || arguments[1] != "-n" {
 		t.Fatalf("non-root SSH user should use sudo -n: %v", arguments)
+	}
+}
+
+func TestRemoteArgumentsSendPoliciesOnStdin(t *testing.T) {
+	policy := NodePolicy{Username: "alice", State: NodeStateDisabled, CapMB: 512, Period: 3}
+	request := ExecutionRequest{
+		Server:   Server{SSHUser: "root"},
+		Task:     TargetTask{Action: "user-update", OldUsername: "alice_old", Username: "alice", Policy: &policy},
+		Password: "Password123",
+	}
+	arguments, stdin, err := remoteArguments("/tmp/manager.sh", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(arguments[3:], " "); got != "user-update alice_old alice" {
+		t.Fatalf("arguments = %q", got)
+	}
+	if stdin != "Password123\ndisabled 512 3\n" {
+		t.Fatalf("stdin = %q", stdin)
+	}
+
+	request.Task = TargetTask{Action: "policy-apply", Policies: []NodePolicy{
+		{Username: "alice", State: NodeStateEnabled, CapMB: UnlimitedCapMB, Period: 0},
+		{Username: "bob", State: NodeStateDisabled, CapMB: 1, Period: 7},
+	}}
+	arguments, stdin, err = remoteArguments("/tmp/manager.sh", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if arguments[len(arguments)-1] != "policy-apply" || stdin != "alice enabled 1073741824 0\nbob disabled 1 7\n" {
+		t.Fatalf("policy-apply arguments %v stdin %q", arguments, stdin)
+	}
+
+	request.Task = TargetTask{Action: "policy-apply", Policies: []NodePolicy{{Username: "bad name", State: NodeStateEnabled, CapMB: 1}}}
+	if _, _, err := remoteArguments("/tmp/manager.sh", request); err == nil {
+		t.Fatal("invalid policy username was accepted")
+	}
+
+	request.Task = TargetTask{Action: "traffic"}
+	arguments, stdin, err = remoteArguments("/tmp/manager.sh", request)
+	if err != nil || arguments[len(arguments)-1] != "traffic" || stdin != "" {
+		t.Fatalf("traffic arguments %v stdin %q err %v", arguments, stdin, err)
 	}
 }
 

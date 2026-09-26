@@ -35,10 +35,15 @@ type Config struct {
 	WorkerPoll        time.Duration
 	SSHTimeout        time.Duration
 	CommandTimeout    time.Duration
-	ScriptPath        string
-	StaticDir         string
-	AllowedOrigins    map[string]struct{}
-	TrustedProxyCIDRs []*net.IPNet
+	// TrafficSyncInterval is how often traffic counters are collected from
+	// the nodes; TrafficReconcileInterval how often due resets, expiry and
+	// exhaustion are evaluated.
+	TrafficSyncInterval      time.Duration
+	TrafficReconcileInterval time.Duration
+	ScriptPath               string
+	StaticDir                string
+	AllowedOrigins           map[string]struct{}
+	TrustedProxyCIDRs        []*net.IPNet
 }
 
 func LoadConfig() (Config, error) {
@@ -128,6 +133,17 @@ func LoadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	trafficSyncInterval, err := envDuration("TRAFFIC_SYNC_INTERVAL", 5*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	trafficReconcileInterval, err := envDuration("TRAFFIC_RECONCILE_INTERVAL", 30*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	if trafficSyncInterval < 30*time.Second || trafficReconcileInterval < 5*time.Second {
+		return Config{}, errors.New("TRAFFIC_SYNC_INTERVAL must be at least 30s and TRAFFIC_RECONCILE_INTERVAL at least 5s")
+	}
 	originsValue := os.Getenv("CORS_ORIGINS")
 	if strings.TrimSpace(originsValue) == "" && environment != "production" {
 		originsValue = "http://localhost:5173,http://127.0.0.1:5173"
@@ -138,24 +154,26 @@ func LoadConfig() (Config, error) {
 	}
 
 	return Config{
-		Environment:       environment,
-		HTTPAddr:          envOrDefault("HTTP_ADDR", ":8080"),
-		DatabasePath:      databasePath,
-		AdminUsername:     envOrDefault("ADMIN_USERNAME", "admin"),
-		AdminPassword:     adminPassword,
-		SessionSecret:     []byte(sessionSecret),
-		MasterKey:         masterKey,
-		SessionTTL:        sessionTTL,
-		CookieSecure:      environment == "production" || envBool("COOKIE_SECURE", false),
-		ExecutorMode:      executorMode,
-		WorkerConcurrency: workerConcurrency,
-		WorkerPoll:        workerPoll,
-		SSHTimeout:        sshTimeout,
-		CommandTimeout:    commandTimeout,
-		ScriptPath:        scriptPath,
-		StaticDir:         staticDir,
-		AllowedOrigins:    parseOrigins(originsValue),
-		TrustedProxyCIDRs: trustedProxyCIDRs,
+		Environment:              environment,
+		HTTPAddr:                 envOrDefault("HTTP_ADDR", ":8080"),
+		DatabasePath:             databasePath,
+		AdminUsername:            envOrDefault("ADMIN_USERNAME", "admin"),
+		AdminPassword:            adminPassword,
+		SessionSecret:            []byte(sessionSecret),
+		MasterKey:                masterKey,
+		SessionTTL:               sessionTTL,
+		CookieSecure:             environment == "production" || envBool("COOKIE_SECURE", false),
+		ExecutorMode:             executorMode,
+		WorkerConcurrency:        workerConcurrency,
+		WorkerPoll:               workerPoll,
+		SSHTimeout:               sshTimeout,
+		CommandTimeout:           commandTimeout,
+		TrafficSyncInterval:      trafficSyncInterval,
+		TrafficReconcileInterval: trafficReconcileInterval,
+		ScriptPath:               scriptPath,
+		StaticDir:                staticDir,
+		AllowedOrigins:           parseOrigins(originsValue),
+		TrustedProxyCIDRs:        trustedProxyCIDRs,
 	}, nil
 }
 

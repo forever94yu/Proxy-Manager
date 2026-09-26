@@ -62,6 +62,7 @@ Go control plane
       3proxy --api command
         |-- inspect / deploy
         |-- user-add / user-update / user-delete
+        |-- policy-apply / traffic
         `-- service status / start / stop / restart
 ```
 
@@ -74,6 +75,8 @@ Go control plane
 ### ProxyUser
 
 代理账号是控制面的全局对象，通过多对多绑定分配到一台或多台服务器。密码同样加密保存，便于后续扩容或失败重试，但列表接口不会返回密码。随机密码只在创建响应中展示一次。
+
+每个账号还有使用限制：启用开关、流量额度（`0` 为不限）、到期时间和周期重置规则（不重置/每天/每周/每月 + 周期起点）。账号状态不单独存储，由控制面按 `已停用 > 已到期 > 流量用尽 > 正常` 的优先级实时推导。详见第 9 节。
 
 ### Job 与 JobTarget
 
@@ -94,9 +97,11 @@ Go control plane
 ```bash
 sudo bash 3proxy-install.sh --api inspect
 sudo bash 3proxy-install.sh --api deploy SERVER_IP HTTP_PORT SOCKS_PORT DNS1 DNS2
-printf '%s\n' "$PASSWORD" | sudo bash 3proxy-install.sh --api user-add USERNAME
-printf '%s\n' "$PASSWORD" | sudo bash 3proxy-install.sh --api user-update OLD_NAME NEW_NAME
+printf '%s\n%s\n' "$PASSWORD" "STATE CAP_MB PERIOD" | sudo bash 3proxy-install.sh --api user-add USERNAME
+printf '%s\n%s\n' "$PASSWORD" "STATE CAP_MB PERIOD" | sudo bash 3proxy-install.sh --api user-update OLD_NAME NEW_NAME
 sudo bash 3proxy-install.sh --api user-delete USERNAME
+printf '%s\n' "NAME STATE CAP_MB PERIOD" | sudo bash 3proxy-install.sh --api policy-apply
+sudo bash 3proxy-install.sh --api traffic
 sudo bash 3proxy-install.sh --api service status
 sudo bash 3proxy-install.sh --api service start
 sudo bash 3proxy-install.sh --api service stop
@@ -112,7 +117,16 @@ PM  http_port  3128
 PM  user       example_user
 ```
 
-账号密码只从 stdin 读取，不出现在远程命令参数中。
+账号密码只从 stdin 读取，不出现在远程命令参数中。`user-add`/`user-update` 可在 stdin 第二行附带该账号的流量策略（可选）。账号变更、`policy-apply` 和 `traffic` 都会输出流量报告：
+
+```text
+PM  traffic_report  v1
+PM  node_user       alice
+PM  traffic         alice  enabled  10240  3  1  52428800
+PM  traffic         bob    removed  512    0  2  1048576
+```
+
+`traffic` 行的字段依次为：用户名、状态（enabled/disabled/removed）、节点上限（MiB）、周期令牌、计数器序号、计数器已用字节。`removed` 行是本次删除的账号计数器的最终值。
 
 ## 5. 节点安全改造
 
@@ -163,10 +177,12 @@ POST   /servers/{id}/service
 POST   /servers/actions/deploy
 POST   /servers/actions/service
 
-GET    /users
+GET    /users?search=&syncStatus=&status=
 POST   /users
 PUT    /users/{id}
 DELETE /users/{id}
+POST   /users/{id}/traffic/reset
+POST   /users/{id}/state            {"enabled": true|false}
 
 GET    /jobs
 GET    /jobs/{id}
@@ -191,3 +207,74 @@ POST   /jobs/{id}/retry
 - 使用真实 HTTP/SOCKS 认证请求进行端到端健康检查。
 
 这些边界不会影响当前的核心流程：在线纳管服务器、部署 3proxy、启停/重启服务，以及在多台服务器上创建、修改和删除代理账号。
+
+## 9. 流量额度、使用期限与流量重置
+
+### 模型
+
+- `proxy_users` 保存启用开关、`traffic_limit_bytes`、`expires_at`、`reset_period`、`reset_anchor`（带 UTC 偏移的 RFC 3339）和当前核算周期令牌 `period_token`。
+- `proxy_user_traffic` 按（用户，服务器）保存节点最近一次报告的策略状态和计数：计数器序号、计数器字节数，以及本周期内已结束计数器的累计字节数（`retained_bytes`）。
+  - 这些行不随绑定删除：解绑或删除服务器后，本周期已用流量仍计入额度，下个周期再清理。这样无法通过“解绑再绑定”绕过额度。
+- 本周期已用流量等于该用户所有 `period_token` 与当前令牌相同的行之和。
+  - 修改额度、期限或重置规则都不会清零已用流量。
+  - 只有手动重置或周期到点才会让令牌加一。
+
+### 节点执行
+
+- 每个账号在 `/etc/3proxy/3proxy.cfg.policy` 中有一行 `NAME INDEX STATE CAP_MB PERIOD`。
+- 生成配置时写入 `counter /etc/3proxy/3proxy.counters`，并为每个账号写两条规则：
+  - `countout`：让上行流量也被计入；
+  - `countall INDEX/NAME N CAP_MB NAME`：统计总流量，达到上限后 3proxy 拒绝该账号认证。
+- `disabled` 账号不写入生效的 `users` 行，reload 后它已建立的会话也会断开。账号本身仍保留在 `3proxy.cfg.users` 中。
+- `PERIOD` 变化时分配一对新的、已清零的计数器，这就是节点侧的“重置”。
+- 配置变更通过 `SIGUSR1` 原地 reload：未受影响账号的连接不中断，3proxy 也会在 reload 时把计数写回磁盘。
+
+### 额度分配
+
+额度是全部绑定服务器用量的合计。控制面为每台节点计算本地上限：
+
+```text
+CAP_MB = ceil((额度 - 其他服务器上本周期已用) / 1 MiB)，至少为 1
+```
+
+- 不限额账号的上限为 1 PiB。
+- 只绑定一台服务器的账号，其上限由节点直接执行。
+- 多节点账号可能少量超用，上限约为一个采集周期内其他节点产生的流量。
+- 3proxy 在每个连接认证时按“上限 - 已用”计算该连接的剩余配额。因此：
+  - 并发或紧接着发起的多个连接可能各自拿到同一份剩余配额，导致少量超用；
+  - 计数达到上限后，新连接一律被拒绝，控制面也会在下一次采集后把账号判定为“流量用尽”并停用。
+- 已建立的连接在配置 reload 后会在下一次收发数据时重新认证，停用或到期的账号因此会被断开。
+- reload 期间 3proxy 会先建新监听、再关旧监听，被旧监听接受的连接会被重置。安装器会等到旧监听消失后才返回，而且只在配置确实变化时才 reload。
+
+### 后台循环
+
+- **采集**（`TRAFFIC_SYNC_INTERVAL`，默认 5 分钟）：
+  - 对每台已部署且已登记主机指纹的服务器，直接通过执行器运行 `--api traffic`，不进入任务列表。
+  - 失败只记录在 `servers.traffic_error`，控制台服务器列表会显示“流量采集失败”。
+- **对账**（`TRAFFIC_RECONCILE_INTERVAL`，默认 30 秒；每次采集结束后也会立即执行）：
+  1. 处理到期的周期重置。错过多个周期时只重置一次。
+  2. 清理不再计入额度的流量行。
+  3. 比较每个绑定的期望策略与节点最近一次报告。出现以下任一情况时，为该服务器排队一个 `user_policy` 任务（操作者为 `system`）：
+     - 状态或周期令牌不同；
+     - 上限偏差超过 `max(64 MiB, 额度的 5%)`；
+     - 节点本地上限即将挡住仍有剩余额度的用户。
+- **防止任务堆积**：以下情况不会排队新的策略任务：
+  - 服务器已有排队或执行中的目标；
+  - 上一个账号类任务的效果尚未被新的流量报告确认；
+  - 15 分钟内有失败的 `user_policy` 任务（退避）。
+
+### 任务与重试
+
+- 创建或编辑账号时，`user-add`/`user-update` 会附带策略行。
+- 手动重置（`user_traffic_reset`）和启用/停用（`user_enable`/`user_disable`）会在每台绑定服务器上执行 `policy-apply`。
+- 策略不写入任务载荷，而是由 worker 在执行前按数据库最新状态计算，因此排队或重试的任务不会下发过期的额度或状态。
+- 重试规则：
+  - 系统 `user_policy` 任务不会让更早失败的账号任务变得不可重试；
+  - 策略类任务本身重试时，不受“存在更新任务”的限制。
+
+### 时间
+
+- 周期按设置时浏览器所在的固定 UTC 偏移计算，不跟随夏令时变化。
+- 月重置从起点逐月推算：起点为 29 至 31 日时，小月落在月末，不会累积漂移。
+- 到期由对账循环检测，最迟约 `TRAFFIC_RECONCILE_INTERVAL` 后生效。
+- 流量用尽在每次采集后检测。

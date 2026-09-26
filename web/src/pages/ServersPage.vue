@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   AlertCircle,
+  AlertTriangle,
   CheckSquare2,
   CirclePlus,
   Pencil,
@@ -358,7 +359,10 @@ onBeforeUnmount(() => {
                 <div class="status-stack"><StatusBadge :status="server.status" compact /><small>{{ formatRelativeTime(server.lastSeenAt) }}</small></div>
               </td>
               <td>
-                <div class="status-stack"><StatusBadge :status="server.installStatus" compact /><StatusBadge v-if="server.installStatus === 'installed'" :status="server.serviceStatus" compact /></div>
+                <div class="status-stack">
+                  <StatusBadge :status="server.installStatus" compact /><StatusBadge v-if="server.installStatus === 'installed'" :status="server.serviceStatus" compact />
+                  <span v-if="server.trafficError" class="traffic-warning" :title="server.trafficError"><AlertTriangle :size="13" />流量采集失败</span>
+                </div>
               </td>
               <td class="hide-tablet">
                 <div class="primary-cell compact-cell"><span>{{ server.os || '待探测' }}</span><small>{{ server.version ? `v${server.version}` : '版本未知' }}</small></div>
