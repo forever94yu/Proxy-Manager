@@ -35,7 +35,8 @@ Proxy-Manager/
 |-- docs/ARCHITECTURE.md       # 本文档
 |-- Dockerfile
 |-- compose.yaml
-|-- .env.example
+|-- .env.example               # 本地开发配置模板
+|-- .env.production.example    # 生产部署配置模板
 |-- package.json
 |-- 3proxy-install.sh          # 保留交互模式，并新增受控的 --api 模式
 `-- tests/
