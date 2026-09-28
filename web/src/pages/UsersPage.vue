@@ -6,6 +6,7 @@ import {
   CirclePlay,
   CirclePlus,
   KeyRound,
+  Link2,
   Pencil,
   RefreshCw,
   RotateCcw,
@@ -20,7 +21,7 @@ import { ApiError } from '@/api/client'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ProgressBar from '@/components/ProgressBar.vue'
-import SecretRevealDialog from '@/components/SecretRevealDialog.vue'
+import ProxyCredentialDialog, { type CredentialDialogMode } from '@/components/ProxyCredentialDialog.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import TableSkeleton from '@/components/TableSkeleton.vue'
 import UserFormDialog from '@/components/UserFormDialog.vue'
@@ -55,7 +56,23 @@ const resetTarget = ref<ProxyUser | null>(null)
 const resetting = ref(false)
 const stateTarget = ref<ProxyUser | null>(null)
 const changingState = ref(false)
-const secretRecord = ref<{ username: string; password: string } | null>(null)
+
+/**
+ * Snapshot shown by the credential dialog. It is decoupled from `users` so the
+ * 10-second auto refresh never swaps the record under an open dialog.
+ */
+interface CredentialView {
+  mode: CredentialDialogMode
+  userId?: string
+  username: string
+  password: string
+  serverIds: string[]
+  loading: boolean
+  error: string
+}
+
+const credentialView = ref<CredentialView | null>(null)
+let credentialRequest = 0
 let searchTimer: number | undefined
 let refreshTimer: number | undefined
 
@@ -69,6 +86,11 @@ const summary = computed(() => ({
 
 const serverMap = computed(() => new Map(servers.value.map((server) => [server.id, server.name])))
 const hasFilters = computed(() => Boolean(search.value || syncStatus.value || usageStatus.value))
+const credentialServers = computed<Server[]>(() => {
+  const ids = credentialView.value?.serverIds || []
+  const byId = new Map(servers.value.map((server) => [server.id, server]))
+  return ids.map((id) => byId.get(id)).filter((server): server is Server => Boolean(server))
+})
 
 async function load(silent = false): Promise<void> {
   if (silent) refreshing.value = true
@@ -141,15 +163,27 @@ function jobDetail(result: { job?: { id: string } }, fallback?: string): string 
 async function submitUser(input: ProxyUserInput): Promise<void> {
   formSubmitting.value = true
   formFieldErrors.value = undefined
+  const creating = !editingUser.value
   try {
     const result = editingUser.value
       ? await usersApi.update(editingUser.value.id, input)
       : await usersApi.create(input)
-    const title = editingUser.value ? '代理用户已更新' : '代理用户已创建'
+    const title = creating ? '代理用户已创建' : '代理用户已更新'
     toast.notify('success', title, jobDetail(result))
     formOpen.value = false
-    if (result.generatedPassword) {
-      secretRecord.value = { username: result.user?.username || input.username, password: result.generatedPassword }
+    // The server echoes only generated passwords; a custom one is already known locally.
+    const password = result.generatedPassword || (creating ? input.password : undefined)
+    if (password) {
+      credentialRequest += 1
+      credentialView.value = {
+        mode: creating ? 'created' : 'reset',
+        userId: result.user?.id,
+        username: result.user?.username || input.username,
+        password,
+        serverIds: result.user?.serverIds || input.serverIds,
+        loading: false,
+        error: '',
+      }
     }
     await load(true)
   } catch (caught) {
@@ -158,6 +192,41 @@ async function submitUser(input: ProxyUserInput): Promise<void> {
   } finally {
     formSubmitting.value = false
   }
+}
+
+async function openCredentials(user: Pick<ProxyUser, 'id' | 'username' | 'serverIds'>): Promise<void> {
+  const request = ++credentialRequest
+  credentialView.value = {
+    mode: 'view',
+    userId: user.id,
+    username: user.username,
+    password: '',
+    serverIds: user.serverIds || [],
+    loading: true,
+    error: '',
+  }
+  try {
+    const credentials = await usersApi.credentials(user.id)
+    if (request !== credentialRequest || !credentialView.value) return
+    credentialView.value = { ...credentialView.value, username: credentials.username, password: credentials.password, loading: false }
+  } catch (caught) {
+    if (request !== credentialRequest || !credentialView.value) return
+    credentialView.value = {
+      ...credentialView.value,
+      loading: false,
+      error: caught instanceof Error ? caught.message : '连接信息加载失败',
+    }
+  }
+}
+
+function retryCredentials(): void {
+  const view = credentialView.value
+  if (view?.userId) void openCredentials({ id: view.userId, username: view.username, serverIds: view.serverIds })
+}
+
+function closeCredentials(): void {
+  credentialRequest += 1
+  credentialView.value = null
 }
 
 async function removeUser(): Promise<void> {
@@ -320,6 +389,7 @@ onBeforeUnmount(() => {
               <td class="hide-tablet"><span :title="formatDateTime(user.updatedAt)">{{ formatRelativeTime(user.updatedAt) }}</span></td>
               <td>
                 <div class="row-actions">
+                  <button class="icon-button" type="button" aria-label="查看连接信息" title="连接信息" @click="openCredentials(user)"><Link2 :size="16" /></button>
                   <button class="icon-button" type="button" aria-label="编辑代理用户" title="编辑用户" @click="openEdit(user)"><Pencil :size="16" /></button>
                   <button class="icon-button" type="button" aria-label="重置本周期流量" title="重置流量" @click="resetTarget = user"><RotateCcw :size="16" /></button>
                   <button
@@ -344,11 +414,16 @@ onBeforeUnmount(() => {
     </section>
 
     <UserFormDialog :open="formOpen" :user="editingUser" :servers="servers" :submitting="formSubmitting" :field-errors="formFieldErrors" @close="formOpen = false" @submit="submitUser" />
-    <SecretRevealDialog
-      :open="Boolean(secretRecord)"
-      :username="secretRecord?.username || ''"
-      :password="secretRecord?.password || ''"
-      @close="secretRecord = null"
+    <ProxyCredentialDialog
+      :open="Boolean(credentialView)"
+      :mode="credentialView?.mode || 'view'"
+      :username="credentialView?.username || ''"
+      :password="credentialView?.password || ''"
+      :servers="credentialServers"
+      :loading="credentialView?.loading"
+      :error="credentialView?.error"
+      @close="closeCredentials"
+      @retry="retryCredentials"
     />
     <ConfirmDialog
       :open="Boolean(resetTarget)"

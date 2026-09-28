@@ -499,6 +499,96 @@ func TestDeleteUserAfterLastServerWasRemoved(t *testing.T) {
 	}
 }
 
+func TestUserCredentialsEndpoint(t *testing.T) {
+	app := newTestApplication(t, nil)
+	loginTestClient(t, app)
+	server := createTestServer(t, app, "credentials", "credentials.example.com", "ssh-secret")
+
+	type mutationEnvelope struct {
+		Data struct {
+			User              ProxyUser `json:"user"`
+			Job               Job       `json:"job"`
+			GeneratedPassword string    `json:"generatedPassword"`
+		} `json:"data"`
+	}
+	type credentialsEnvelope struct {
+		Data struct {
+			ID       string `json:"id"`
+			Username string `json:"username"`
+			Password string `json:"password"`
+		} `json:"data"`
+	}
+	fetchCredentials := func(userID string) credentialsEnvelope {
+		t.Helper()
+		response := requestJSON(t, app.client, http.MethodGet, app.server.URL+"/api/v1/users/"+userID+"/credentials", nil)
+		assertStatus(t, response, http.StatusOK)
+		if cacheControl := response.Header.Get("Cache-Control"); cacheControl != "no-store" {
+			t.Fatalf("credentials Cache-Control = %q, want no-store", cacheControl)
+		}
+		var envelope credentialsEnvelope
+		decodeBody(t, readBody(t, response), &envelope)
+		return envelope
+	}
+
+	const customPassword = "Custom@Pass+123"
+	response := requestJSON(t, app.client, http.MethodPost, app.server.URL+"/api/v1/users", map[string]any{
+		"username": "custom_user", "passwordMode": "custom", "password": customPassword,
+		"serverIds": []string{server.ID},
+	})
+	assertStatus(t, response, http.StatusAccepted)
+	var custom mutationEnvelope
+	decodeBody(t, readBody(t, response), &custom)
+	_ = waitForJob(t, app, custom.Data.Job.ID)
+	credentials := fetchCredentials(custom.Data.User.ID)
+	if credentials.Data.ID != custom.Data.User.ID || credentials.Data.Username != "custom_user" || credentials.Data.Password != customPassword {
+		t.Fatalf("custom credentials = %+v", credentials.Data)
+	}
+
+	response = requestJSON(t, app.client, http.MethodPost, app.server.URL+"/api/v1/users", map[string]any{
+		"username": "generated_user", "passwordMode": "generated", "serverIds": []string{server.ID},
+	})
+	assertStatus(t, response, http.StatusAccepted)
+	var generated mutationEnvelope
+	decodeBody(t, readBody(t, response), &generated)
+	_ = waitForJob(t, app, generated.Data.Job.ID)
+	if generated.Data.GeneratedPassword == "" {
+		t.Fatal("generated user creation returned no password")
+	}
+	if credentials := fetchCredentials(generated.Data.User.ID); credentials.Data.Password != generated.Data.GeneratedPassword {
+		t.Fatalf("generated credentials = %q, want %q", credentials.Data.Password, generated.Data.GeneratedPassword)
+	}
+
+	response = requestJSON(t, app.client, http.MethodPut, app.server.URL+"/api/v1/users/"+generated.Data.User.ID, map[string]any{
+		"username": "generated_user", "passwordMode": "generated", "serverIds": []string{server.ID},
+	})
+	assertStatus(t, response, http.StatusAccepted)
+	var rotated mutationEnvelope
+	decodeBody(t, readBody(t, response), &rotated)
+	_ = waitForJob(t, app, rotated.Data.Job.ID)
+	if rotated.Data.GeneratedPassword == "" || rotated.Data.GeneratedPassword == generated.Data.GeneratedPassword {
+		t.Fatalf("password rotation returned %q", rotated.Data.GeneratedPassword)
+	}
+	if credentials := fetchCredentials(generated.Data.User.ID); credentials.Data.Password != rotated.Data.GeneratedPassword {
+		t.Fatalf("rotated credentials = %q, want %q", credentials.Data.Password, rotated.Data.GeneratedPassword)
+	}
+
+	response = requestJSON(t, app.client, http.MethodGet, app.server.URL+"/api/v1/users/00000000-0000-4000-8000-000000000000/credentials", nil)
+	assertStatus(t, response, http.StatusNotFound)
+	response.Body.Close()
+
+	anonymous := &http.Client{}
+	response = requestJSON(t, anonymous, http.MethodGet, app.server.URL+"/api/v1/users/"+custom.Data.User.ID+"/credentials", nil)
+	assertStatus(t, response, http.StatusUnauthorized)
+	if body := readBody(t, response); strings.Contains(body, customPassword) {
+		t.Fatalf("unauthenticated credentials request leaked the password: %s", body)
+	}
+
+	response = requestJSON(t, app.client, http.MethodGet, app.server.URL+"/api/v1/users", nil)
+	if body := readBody(t, response); strings.Contains(body, customPassword) || strings.Contains(body, "password") {
+		t.Fatalf("user list leaked password material: %s", body)
+	}
+}
+
 func createTestServer(t *testing.T, app *testApplication, name, host, credential string) Server {
 	t.Helper()
 	response := requestJSON(t, app.client, http.MethodPost, app.server.URL+"/api/v1/servers", map[string]any{

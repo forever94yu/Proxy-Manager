@@ -172,7 +172,7 @@ function submit(): void {
       <section class="form-section">
         <div class="form-section-heading">
           <h3>账号凭据</h3>
-          <p>密码保存后不会再次回显；生成密码仅展示一次。</p>
+          <p>保存后可在列表的“连接信息”中查看并复制密码与连接地址。</p>
         </div>
         <label class="field">
           <span>代理用户名</span>

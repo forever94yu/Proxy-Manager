@@ -182,6 +182,13 @@ export interface UserMutationResult {
   generatedPassword?: string
 }
 
+/** Current plaintext credentials of one proxy user, revealed on demand. */
+export interface ProxyUserCredentials {
+  id: string
+  username: string
+  password: string
+}
+
 export interface JobMutationResult {
   job?: Job
   message?: string

@@ -143,3 +143,61 @@ export function describeRemaining(value?: string): string {
   if (hours < 48) return `剩余 ${Math.round(hours)} 小时`
   return `剩余 ${Math.floor(hours / 24)} 天`
 }
+
+/**
+ * Copies text to the clipboard. The async Clipboard API only exists in secure
+ * contexts (HTTPS or localhost); the console is often served over plain HTTP,
+ * so fall back to a temporary textarea and execCommand('copy').
+ */
+export async function copyText(text: string): Promise<boolean> {
+  if (window.isSecureContext && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text)
+      return true
+    } catch {
+      // Permission denied or document not focused: try the legacy path.
+    }
+  }
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.setAttribute('readonly', '')
+  textarea.style.position = 'fixed'
+  textarea.style.top = '0'
+  textarea.style.left = '0'
+  textarea.style.opacity = '0'
+  textarea.style.pointerEvents = 'none'
+  const activeElement = document.activeElement as HTMLElement | null
+  document.body.appendChild(textarea)
+  try {
+    textarea.select()
+    textarea.setSelectionRange(0, text.length)
+    return document.execCommand('copy')
+  } catch {
+    return false
+  } finally {
+    textarea.remove()
+    activeElement?.focus({ preventScroll: true })
+  }
+}
+
+/** Host as it must appear in an address or URL: bare IPv6 literals get brackets. */
+export function formatHost(host: string): string {
+  return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
+}
+
+/** "host:port" with IPv6 literals bracketed, e.g. [2001:db8::1]:3128. */
+export function formatHostPort(host: string, port: number): string {
+  return `${formatHost(host)}:${port}`
+}
+
+export type ProxyScheme = 'http' | 'socks5'
+
+/**
+ * Proxy URL such as http://alice:secret@203.0.113.10:3128. The username and
+ * password are percent-encoded because custom passwords may contain @ % + etc.
+ * `masked` replaces the password with dots for on-screen display.
+ */
+export function buildProxyUri(scheme: ProxyScheme, username: string, password: string, host: string, port: number, masked = false): string {
+  const secret = masked ? '••••••' : encodeURIComponent(password)
+  return `${scheme}://${encodeURIComponent(username)}:${secret}@${formatHostPort(host, port)}`
+}

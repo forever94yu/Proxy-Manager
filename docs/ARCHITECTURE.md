@@ -141,7 +141,7 @@ PM  traffic         bob    removed  512    0  2  1048576
 6. 配置应用后检查服务；失败时恢复原用户文件并重新生成配置。
 7. 新增按用户名修改账号和轮换密码，不再依赖易漂移的菜单序号。
 
-3proxy 的 `CL` 认证格式仍要求节点保存明文密码，这是上游格式约束。节点文件已限制为 root 可读；控制面日志会脱敏，浏览器列表也不会获得密码。
+3proxy 的 `CL` 认证格式仍要求节点保存明文密码，这是上游格式约束。节点文件已限制为 root 可读；控制面日志会脱敏，浏览器列表也不会获得密码。只有管理员主动点击“连接信息”时，才会通过 `GET /users/{id}/credentials` 单独解密返回当前密码；该响应带 `Cache-Control: no-store`，每次调用都会写一条不含密码的审计日志。
 
 ## 6. 控制面安全边界
 
@@ -182,6 +182,7 @@ GET    /users?search=&syncStatus=&status=
 POST   /users
 PUT    /users/{id}
 DELETE /users/{id}
+GET    /users/{id}/credentials      返回 {id, username, password}，供“连接信息”弹窗使用
 POST   /users/{id}/traffic/reset
 POST   /users/{id}/state            {"enabled": true|false}
 

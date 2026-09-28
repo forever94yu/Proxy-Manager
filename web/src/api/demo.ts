@@ -4,6 +4,7 @@ import type {
   JobMutationResult,
   Operator,
   ProxyUser,
+  ProxyUserCredentials,
   ProxyUserInput,
   Server,
   ServerInput,
@@ -218,6 +219,20 @@ function uniqueId(prefix: string): string {
 function randomPassword(): string {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
   return Array.from({ length: 16 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join('')
+}
+
+/** Current password per demo user; seeded users get one lazily on first reveal. */
+const demoPasswords = new Map<string, string>()
+
+/** Applies a password mode like the server and returns the generated password, if any. */
+function storeDemoPassword(userId: string, input: ProxyUserInput): string | undefined {
+  if (input.passwordMode === 'generated') {
+    const password = randomPassword()
+    demoPasswords.set(userId, password)
+    return password
+  }
+  if (input.passwordMode === 'custom' && input.password) demoPasswords.set(userId, input.password)
+  return undefined
 }
 
 function createJob(type: string, targetCount = 1, message = '任务已进入执行队列'): Job {
@@ -439,7 +454,7 @@ export async function demoRequest<T>(path: string, method: string, body?: unknow
     const result: UserMutationResult = {
       user: withStatus(user),
       job,
-      generatedPassword: input.passwordMode === 'generated' ? randomPassword() : undefined,
+      generatedPassword: storeDemoPassword(user.id, input),
     }
     return clone(result) as T
   }
@@ -467,6 +482,18 @@ export async function demoRequest<T>(path: string, method: string, body?: unknow
     return clone(result) as T
   }
 
+  const credentialsMatch = pathname.match(/^\/users\/([^/]+)\/credentials$/)
+  if (credentialsMatch && method === 'GET') {
+    const user = users.find((item) => item.id === decodeURIComponent(credentialsMatch[1]))
+    if (!user) throw new DemoApiError(404, '代理用户不存在')
+    let password = demoPasswords.get(user.id)
+    if (!password) {
+      password = randomPassword()
+      demoPasswords.set(user.id, password)
+    }
+    return clone({ id: user.id, username: user.username, password } satisfies ProxyUserCredentials) as T
+  }
+
   const userMatch = pathname.match(/^\/users\/([^/]+)$/)
   if (userMatch) {
     const id = decodeURIComponent(userMatch[1])
@@ -488,7 +515,7 @@ export async function demoRequest<T>(path: string, method: string, body?: unknow
       const result: UserMutationResult = {
         user: withStatus(users[index]),
         job,
-        generatedPassword: input.passwordMode === 'generated' ? randomPassword() : undefined,
+        generatedPassword: storeDemoPassword(id, input),
       }
       return clone(result) as T
     }
@@ -496,6 +523,7 @@ export async function demoRequest<T>(path: string, method: string, body?: unknow
     if (method === 'DELETE') {
       const user = users[index]
       users = users.filter((item) => item.id !== id)
+      demoPasswords.delete(id)
       const result: UserMutationResult = {
         job: createJob('user_delete', user.serverCount || 0, `正在从目标服务器移除 ${user.username}`),
       }

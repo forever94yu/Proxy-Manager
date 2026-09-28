@@ -8,6 +8,7 @@ import type {
   ListResponse,
   Operator,
   ProxyUser,
+  ProxyUserCredentials,
   ProxyUserInput,
   Server,
   ServerInput,
@@ -110,6 +111,10 @@ export const usersApi = {
   },
   async setEnabled(id: string, enabled: boolean): Promise<UserMutationResult> {
     return normalizeUserMutation(await apiRequest<UserResponse | undefined>(`/users/${encodeURIComponent(id)}/state`, { method: 'POST', body: { enabled } }))
+  },
+  /** Reveals the current password so connection details can be viewed and copied again. */
+  credentials(id: string): Promise<ProxyUserCredentials> {
+    return apiRequest(`/users/${encodeURIComponent(id)}/credentials`)
   },
 }
 

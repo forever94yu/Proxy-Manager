@@ -77,6 +77,7 @@ func (a *API) Handler() http.Handler {
 	protected.HandleFunc("GET /api/v1/users", a.listUsers)
 	protected.HandleFunc("POST /api/v1/users", a.createUser)
 	protected.HandleFunc("GET /api/v1/users/{id}", a.getUser)
+	protected.HandleFunc("GET /api/v1/users/{id}/credentials", a.getUserCredentials)
 	protected.HandleFunc("PUT /api/v1/users/{id}", a.updateUser)
 	protected.HandleFunc("DELETE /api/v1/users/{id}", a.deleteUser)
 	protected.HandleFunc("POST /api/v1/users/{id}/traffic/reset", a.resetUserTraffic)
@@ -459,6 +460,32 @@ func (a *API) getUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeData(w, http.StatusOK, user)
+}
+
+// getUserCredentials reveals the current proxy password of one user so the
+// operator can view and copy the connection details again after creation.
+func (a *API) getUserCredentials(w http.ResponseWriter, r *http.Request) {
+	user, err := a.userFromPath(r)
+	if err != nil {
+		a.storeError(w, r, err, "Proxy user not found")
+		return
+	}
+	plaintext, err := a.box.Decrypt(user.PasswordCipher, "user:"+user.ID+":password")
+	if err != nil {
+		a.internalError(w, r, errors.New("stored proxy password cannot be decrypted"))
+		return
+	}
+	password := string(plaintext)
+	for index := range plaintext {
+		plaintext[index] = 0
+	}
+	a.logger.Info("proxy credentials revealed", "user", user.ID, "actor", actorFromContext(r.Context()))
+	w.Header().Set("Cache-Control", "no-store")
+	writeData(w, http.StatusOK, map[string]string{
+		"id":       user.ID,
+		"username": user.Username,
+		"password": password,
+	})
 }
 
 func (a *API) createUser(w http.ResponseWriter, r *http.Request) {
