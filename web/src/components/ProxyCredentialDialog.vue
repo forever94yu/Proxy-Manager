@@ -4,6 +4,7 @@ import { AlertCircle, Check, ClipboardCopy, Server as ServerIcon, ShieldCheck } 
 
 import CopyField from '@/components/CopyField.vue'
 import ModalDialog from '@/components/ModalDialog.vue'
+import ProxyQrImport from '@/components/ProxyQrImport.vue'
 import { useToastStore } from '@/stores/toast'
 import type { Server } from '@/types'
 import { buildProxyUri, copyText, formatHost, formatHostPort } from '@/utils'
@@ -13,6 +14,8 @@ export type CredentialDialogMode = 'created' | 'reset' | 'view'
 const props = withDefaults(defineProps<{
   open: boolean
   mode: CredentialDialogMode
+  /** Needed for the subscription URL; absent if the server did not echo the user. */
+  userId?: string
   username: string
   password: string
   /** Servers the user is bound to; one connection block is shown per server. */
@@ -20,6 +23,7 @@ const props = withDefaults(defineProps<{
   loading?: boolean
   error?: string
 }>(), {
+  userId: undefined,
   loading: false,
   error: '',
 })
@@ -103,7 +107,7 @@ onBeforeUnmount(() => window.clearTimeout(resetTimer))
   <ModalDialog
     :open="open"
     :title="title"
-    description="用户名、密码和连接地址可随时在代理用户列表的“连接信息”中再次查看。"
+    description="用户名、密码、连接地址和导入二维码可随时在代理用户列表的“连接信息”中再次查看。"
     size="medium"
     @close="$emit('close')"
   >
@@ -123,6 +127,15 @@ onBeforeUnmount(() => window.clearTimeout(resetTimer))
         <p v-if="mode === 'created'">账号 <strong>{{ username }}</strong> 已创建，同步任务正在后台执行。</p>
         <p v-else>账号 <strong>{{ username }}</strong> 的新密码已生成，同步任务正在后台执行。</p>
       </div>
+
+      <ProxyQrImport
+        v-if="connections.length"
+        :key="userId || username"
+        :user-id="userId"
+        :username="username"
+        :password="password"
+        :servers="servers"
+      />
 
       <section class="credential-section">
         <h3>账号凭据</h3>

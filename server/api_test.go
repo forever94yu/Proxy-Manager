@@ -49,6 +49,7 @@ type testApplication struct {
 	store  *Store
 	box    *SecretBox
 	worker *Worker
+	api    *API
 	server *httptest.Server
 	client *http.Client
 	cancel context.CancelFunc
@@ -95,7 +96,7 @@ func newTestApplication(t *testing.T, executor Executor) *testApplication {
 		t.Fatalf("cookiejar.New: %v", err)
 	}
 	application := &testApplication{
-		store: store, box: box, worker: worker, server: testServer,
+		store: store, box: box, worker: worker, api: api, server: testServer,
 		client: &http.Client{Jar: jar}, cancel: cancel,
 	}
 	t.Cleanup(func() {

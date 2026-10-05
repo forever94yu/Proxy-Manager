@@ -417,6 +417,7 @@ onBeforeUnmount(() => {
     <ProxyCredentialDialog
       :open="Boolean(credentialView)"
       :mode="credentialView?.mode || 'view'"
+      :user-id="credentialView?.userId"
       :username="credentialView?.username || ''"
       :password="credentialView?.password || ''"
       :servers="credentialServers"

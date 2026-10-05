@@ -60,6 +60,10 @@ type ProxyUser struct {
 	NextResetAt       *time.Time `json:"nextResetAt,omitempty"`
 	LastResetAt       *time.Time `json:"lastResetAt,omitempty"`
 
+	// SubscriptionVersion is signed into the subscription URL; incrementing
+	// it revokes the URL.
+	SubscriptionVersion int64 `json:"-"`
+
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }

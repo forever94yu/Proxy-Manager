@@ -201,3 +201,45 @@ export function buildProxyUri(scheme: ProxyScheme, username: string, password: s
   const secret = masked ? '••••••' : encodeURIComponent(password)
   return `${scheme}://${encodeURIComponent(username)}:${secret}@${formatHostPort(host, port)}`
 }
+
+/** Standard base64 of a UTF-8 string. */
+function base64Encode(value: string): string {
+  let binary = ''
+  for (const byte of new TextEncoder().encode(value)) binary += String.fromCharCode(byte)
+  return btoa(binary)
+}
+
+/**
+ * SOCKS5 node link in the format v2rayN and v2rayNG export, e.g.
+ * socks://YWxpY2U6c2VjcmV0@203.0.113.10:1080#Tokyo. The user info is
+ * base64(user:pass): standard alphabet, no padding, percent-encoded. v2rayNG,
+ * v2rayN and NekoBox import it from a QR code. shareLink in
+ * server/subscription.go builds identical links for subscriptions.
+ */
+export function buildNodeShareLink(name: string, username: string, password: string, host: string, port: number): string {
+  const userInfo = encodeURIComponent(base64Encode(`${username}:${password}`).replace(/=+$/, ''))
+  return `socks://${userInfo}@${formatHostPort(host, port)}#${encodeURIComponent(name)}`
+}
+
+/**
+ * SOCKS5 node link in the format subscription panels serve to Shadowrocket:
+ * socks://base64(user:pass@host:port)?method=auto#Tokyo.
+ */
+export function buildShadowrocketNodeLink(name: string, username: string, password: string, host: string, port: number): string {
+  return `socks://${base64Encode(`${username}:${password}@${formatHostPort(host, port)}`)}?method=auto#${encodeURIComponent(name)}`
+}
+
+/**
+ * Subscription URL wrapped in Shadowrocket's add-subscription scheme; its
+ * scanner silently ignores a plain subscription URL. The iPhone camera opens
+ * Shadowrocket directly for this link. The URL must be standard (not URL-safe)
+ * base64 or Shadowrocket ignores the code.
+ */
+export function buildShadowrocketSubscriptionLink(url: string, remark: string): string {
+  return `shadowrocket://add/sub/${base64Encode(url)}?remark=${encodeURIComponent(remark)}`
+}
+
+/** Absolute subscription URL; falls back to the origin the console runs on. */
+export function resolveSubscriptionUrl(subscription: { path: string; url?: string }): string {
+  return subscription.url || new URL(subscription.path, window.location.origin).toString()
+}

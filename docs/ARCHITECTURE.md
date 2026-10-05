@@ -183,6 +183,8 @@ POST   /users
 PUT    /users/{id}
 DELETE /users/{id}
 GET    /users/{id}/credentials      返回 {id, username, password}，供“连接信息”弹窗使用
+GET    /users/{id}/subscription     返回 {path, url?}，订阅地址；配置 PUBLIC_URL 时 url 为绝对地址
+POST   /users/{id}/subscription/reset  作废当前订阅地址并返回新地址
 POST   /users/{id}/traffic/reset
 POST   /users/{id}/state            {"enabled": true|false}
 
@@ -280,3 +282,21 @@ CAP_MB = ceil((额度 - 其他服务器上本周期已用) / 1 MiB)，至少为 
 - 月重置从起点逐月推算：起点为 29 至 31 日时，小月落在月末，不会累积漂移。
 - 到期由对账循环检测，最迟约 `TRAFFIC_RECONCILE_INTERVAL` 后生效。
 - 流量用尽在每次采集后检测。
+
+## 10. 扫码导入与订阅
+
+“连接信息”弹窗为手机代理客户端生成两种二维码：
+
+- **单个节点**：一台服务器的 SOCKS5 分享链接，由浏览器在本地生成，不经过服务端。v2rayNG / NekoBox 使用 v2rayN 格式 `socks://base64(user:pass)@host:port#名称`（标准 Base64、去掉补位、URL 编码）；Shadowrocket 使用订阅面板下发给它的格式 `socks://base64(user:pass@host:port)?method=auto#名称`。HTTP 没有被各客户端统一识别的分享格式，因此节点二维码只用 SOCKS5。
+- **订阅**：`GET /sub/{token}`，包含全部目标服务器的 SOCKS5 和 HTTP 节点。账号绑定一台服务器时默认显示节点二维码，多台时默认显示订阅二维码，管理员可以切换。
+
+订阅接口不需要控制台会话，地址中的 token 就是凭据：
+
+- token 为 `base64url(用户 ID ‖ HMAC-SHA256(用户 ID ‖ subscription_version)[:16])`。HMAC 密钥由 `MASTER_KEY` 派生，数据库不保存 token；更换 `SESSION_SECRET` 不影响订阅。
+- 重置订阅地址会把 `proxy_users.subscription_version` 加一，旧地址立即失效。该操作不改变节点配置，因此不更新 `updated_at`，也不会让正在编辑的表单失效。
+- token 无效、版本不符和用户不存在都返回相同的 404。访问日志中的 `/sub/` 路径会被替换为 `/sub/[redacted]`；查看、重置和拉取订阅都会写一条不含密码的审计日志。
+- 响应带 `Cache-Control: no-store`、`Subscription-Userinfo`（已用流量、额度和到期时间，0 表示不限）、`Profile-Update-Interval` 和 `Content-Disposition` 文件名（Clash 客户端用作配置名称）。
+
+返回格式按 `?format=clash|base64` 指定，否则按 User-Agent 判断：Clash、mihomo、Stash、Shadowrocket 和 NekoBox 得到完整的 Clash 配置（节点、一个“节点选择”策略组和 `MATCH` 规则）；其他客户端（v2rayN、v2rayNG、Hiddify 等）得到 Base64 编码的分享链接列表。订阅中的节点按服务器名称排序，被停用或到期的账号仍会返回节点，由节点拒绝认证，客户端可以通过 `Subscription-Userinfo` 看到额度和到期状态。
+
+订阅地址的域名取自 `PUBLIC_URL`；未配置时由浏览器用当前访问控制台的地址拼接。Shadowrocket 首页扫码不会把普通订阅地址识别为订阅，因此它的订阅二维码包装为 `shadowrocket://add/sub/<标准 Base64 地址>?remark=用户名`。

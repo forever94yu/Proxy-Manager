@@ -21,13 +21,14 @@ import (
 )
 
 type API struct {
-	cfg      Config
-	store    *Store
-	box      *SecretBox
-	sessions *SessionManager
-	worker   *Worker
-	logger   *slog.Logger
-	logins   *loginLimiter
+	cfg           Config
+	store         *Store
+	box           *SecretBox
+	sessions      *SessionManager
+	worker        *Worker
+	logger        *slog.Logger
+	logins        *loginLimiter
+	subscriptions *SubscriptionSigner
 }
 
 type apiErrorEnvelope struct {
@@ -43,7 +44,8 @@ type apiError struct {
 func NewAPI(cfg Config, store *Store, box *SecretBox, sessions *SessionManager, worker *Worker, logger *slog.Logger) *API {
 	return &API{
 		cfg: cfg, store: store, box: box, sessions: sessions, worker: worker, logger: logger,
-		logins: newLoginLimiter(10, 15*time.Minute),
+		logins:        newLoginLimiter(10, 15*time.Minute),
+		subscriptions: NewSubscriptionSigner(cfg.MasterKey),
 	}
 }
 
@@ -56,6 +58,9 @@ func (a *API) Handler() http.Handler {
 	})
 	root.HandleFunc("GET /readyz", a.ready)
 	root.HandleFunc("POST /api/v1/auth/login", a.login)
+	// Proxy clients fetch subscriptions without a console session; the URL
+	// token is the credential.
+	root.HandleFunc("GET "+subscriptionPathPrefix+"{token}", a.serveSubscription)
 	root.Handle("/api/v1/", a.sessions.Middleware(protected))
 
 	protected.HandleFunc("POST /api/v1/auth/logout", a.logout)
@@ -78,6 +83,8 @@ func (a *API) Handler() http.Handler {
 	protected.HandleFunc("POST /api/v1/users", a.createUser)
 	protected.HandleFunc("GET /api/v1/users/{id}", a.getUser)
 	protected.HandleFunc("GET /api/v1/users/{id}/credentials", a.getUserCredentials)
+	protected.HandleFunc("GET /api/v1/users/{id}/subscription", a.getUserSubscription)
+	protected.HandleFunc("POST /api/v1/users/{id}/subscription/reset", a.resetUserSubscription)
 	protected.HandleFunc("PUT /api/v1/users/{id}", a.updateUser)
 	protected.HandleFunc("DELETE /api/v1/users/{id}", a.deleteUser)
 	protected.HandleFunc("POST /api/v1/users/{id}/traffic/reset", a.resetUserTraffic)
@@ -486,6 +493,108 @@ func (a *API) getUserCredentials(w http.ResponseWriter, r *http.Request) {
 		"username": user.Username,
 		"password": password,
 	})
+}
+
+// getUserSubscription returns the subscription URL of a user: url is absolute
+// when PUBLIC_URL is configured; otherwise the console resolves path against
+// the origin it talks to.
+func (a *API) getUserSubscription(w http.ResponseWriter, r *http.Request) {
+	user, err := a.userFromPath(r)
+	if err != nil {
+		a.storeError(w, r, err, "Proxy user not found")
+		return
+	}
+	// The URL grants access to the password, so reveals are audited like
+	// credentials.
+	a.logger.Info("proxy subscription revealed", "user", user.ID, "actor", actorFromContext(r.Context()))
+	a.writeSubscription(w, r, user)
+}
+
+// resetUserSubscription revokes the current subscription URL and returns the
+// new one.
+func (a *API) resetUserSubscription(w http.ResponseWriter, r *http.Request) {
+	if !decodeEmptyObject(w, r) {
+		return
+	}
+	user, err := a.userFromPath(r)
+	if err != nil {
+		a.storeError(w, r, err, "Proxy user not found")
+		return
+	}
+	if err := a.store.RotateProxyUserSubscription(r.Context(), user.ID); err != nil {
+		a.storeError(w, r, err, "Proxy user not found")
+		return
+	}
+	user.SubscriptionVersion++
+	a.logger.Info("proxy subscription reset", "user", user.ID, "actor", actorFromContext(r.Context()))
+	a.writeSubscription(w, r, user)
+}
+
+func (a *API) writeSubscription(w http.ResponseWriter, r *http.Request, user ProxyUser) {
+	token, err := a.subscriptions.Token(user.ID, user.SubscriptionVersion)
+	if err != nil {
+		a.internalError(w, r, err)
+		return
+	}
+	data := map[string]string{"path": subscriptionPathPrefix + token}
+	if a.cfg.PublicURL != "" {
+		data["url"] = a.cfg.PublicURL + data["path"]
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeData(w, http.StatusOK, data)
+}
+
+// serveSubscription answers proxy clients. Every failure is a plain 404 so the
+// endpoint does not reveal whether a user exists.
+func (a *API) serveSubscription(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	userID, ok := a.subscriptions.UserID(token)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	user, err := a.store.GetProxyUser(r.Context(), userID)
+	if errors.Is(err, ErrNotFound) || (err == nil && !a.subscriptions.Valid(token, user.ID, user.SubscriptionVersion)) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		a.internalError(w, r, err)
+		return
+	}
+	servers, err := a.serversByID(r.Context(), user.ServerIDs)
+	if err != nil {
+		a.internalError(w, r, err)
+		return
+	}
+	// Same order as the console's server list.
+	slices.SortFunc(servers, func(left, right Server) int {
+		return strings.Compare(strings.ToLower(left.Name), strings.ToLower(right.Name))
+	})
+	plaintext, err := a.box.Decrypt(user.PasswordCipher, "user:"+user.ID+":password")
+	if err != nil {
+		a.internalError(w, r, errors.New("stored proxy password cannot be decrypted"))
+		return
+	}
+	nodes := subscriptionNodes(servers, user.Username, string(plaintext))
+	for index := range plaintext {
+		plaintext[index] = 0
+	}
+	format := subscriptionFormat(r.URL.Query(), r.UserAgent())
+	body, fileName, contentType := shareLinksSubscription(nodes), user.Username+".txt", "text/plain; charset=utf-8"
+	if format == "clash" {
+		body, fileName, contentType = clashSubscription(nodes), user.Username+".yaml", "text/yaml; charset=utf-8"
+	}
+	a.logger.Info("proxy subscription fetched", "user", user.ID, "format", format, "nodes", len(nodes))
+	header := w.Header()
+	header.Set("Content-Type", contentType)
+	header.Set("Cache-Control", "no-store")
+	// Clash clients name the profile after the file name.
+	header.Set("Content-Disposition", `attachment; filename="`+fileName+`"`)
+	header.Set("Profile-Update-Interval", strconv.Itoa(subscriptionUpdateHours))
+	header.Set("Subscription-Userinfo", subscriptionUserInfo(user))
+	w.WriteHeader(http.StatusOK)
+	w.Write(body)
 }
 
 func (a *API) createUser(w http.ResponseWriter, r *http.Request) {
@@ -1038,7 +1147,7 @@ func (a *API) enqueueError(w http.ResponseWriter, r *http.Request, err error, no
 }
 
 func (a *API) internalError(w http.ResponseWriter, r *http.Request, err error) {
-	a.logger.Error("request failed", "method", r.Method, "path", r.URL.Path, "error", sanitizeMessage(err.Error()))
+	a.logger.Error("request failed", "method", r.Method, "path", redactedPath(r.URL.Path), "error", sanitizeMessage(err.Error()))
 	writeError(w, http.StatusInternalServerError, "internal_error", "The operation could not be completed", nil)
 }
 
@@ -1073,7 +1182,7 @@ func (a *API) recoverMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				a.logger.Error("HTTP handler panic", "method", r.Method, "path", r.URL.Path,
+				a.logger.Error("HTTP handler panic", "method", r.Method, "path", redactedPath(r.URL.Path),
 					"panic", fmt.Sprint(recovered), "stack", string(debug.Stack()))
 				writeError(w, http.StatusInternalServerError, "internal_error", "The operation could not be completed", nil)
 			}
@@ -1143,7 +1252,7 @@ func (a *API) accessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		next.ServeHTTP(w, r)
-		a.logger.Info("HTTP request", "method", r.Method, "path", r.URL.Path, "duration", time.Since(started))
+		a.logger.Info("HTTP request", "method", r.Method, "path", redactedPath(r.URL.Path), "duration", time.Since(started))
 	})
 }
 

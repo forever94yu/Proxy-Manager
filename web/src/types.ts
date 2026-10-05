@@ -189,6 +189,14 @@ export interface ProxyUserCredentials {
   password: string
 }
 
+/** Subscription URL of one proxy user; fetching it needs no console session. */
+export interface ProxyUserSubscription {
+  /** Path on the console origin, e.g. /sub/<token>. */
+  path: string
+  /** Absolute URL; present only when the server has PUBLIC_URL configured. */
+  url?: string
+}
+
 export interface JobMutationResult {
   job?: Job
   message?: string

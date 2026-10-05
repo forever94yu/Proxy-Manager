@@ -38,7 +38,8 @@ go -C server run .
 Other useful settings are `HTTP_ADDR`, `DB_PATH`, `ADMIN_USERNAME`,
 `SESSION_TTL`, `COOKIE_SECURE`, `WORKER_CONCURRENCY`, `WORKER_POLL_INTERVAL`,
 `SSH_TIMEOUT`, `COMMAND_TIMEOUT`, `TRAFFIC_SYNC_INTERVAL` (default `5m`),
-`TRAFFIC_RECONCILE_INTERVAL` (default `30s`), `INSTALL_SCRIPT_PATH`, `STATIC_DIR`, and
+`TRAFFIC_RECONCILE_INTERVAL` (default `30s`), `INSTALL_SCRIPT_PATH`, `STATIC_DIR`,
+`PUBLIC_URL` (origin used in subscription URLs, e.g. `https://pm.example.com`), and
 `CORS_ORIGINS` (comma-separated exact origins). `TRUSTED_PROXY_CIDRS` accepts a
 comma-separated set of reverse-proxy addresses or CIDRs; only those peers may
 supply `X-Forwarded-For` for login rate limiting or `X-Forwarded-Proto` for

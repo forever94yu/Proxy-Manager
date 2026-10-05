@@ -375,7 +375,7 @@ func scanServer(scanner interface{ Scan(...any) error }) (Server, error) {
 const proxyUserColumns = `
 u.id, u.username, u.password_cipher, u.sync_status, u.created_at, u.updated_at,
 u.enabled, u.traffic_limit_bytes, u.expires_at, u.reset_period, u.reset_anchor,
-u.period_token, u.period_started_at, u.next_reset_at, u.last_reset_at,
+u.period_token, u.period_started_at, u.next_reset_at, u.last_reset_at, u.subscription_version,
 COALESCE((SELECT SUM(ut.retained_bytes + ut.counter_bytes) FROM proxy_user_traffic ut
           WHERE ut.user_id = u.id AND ut.period_token = u.period_token), 0),
 (SELECT MAX(ut.observed_at) FROM proxy_user_traffic ut WHERE ut.user_id = u.id)`
@@ -398,7 +398,7 @@ func (r *proxyUserRow) targets() []any {
 	return []any{
 		&r.user.ID, &r.user.Username, &r.user.PasswordCipher, &r.user.SyncStatus, &r.createdAt, &r.updatedAt,
 		&r.enabled, &r.user.TrafficLimitBytes, &r.expiresAt, &r.user.ResetPeriod, &r.user.ResetAnchor,
-		&r.user.PeriodToken, &r.periodStartedAt, &r.nextResetAt, &r.lastResetAt,
+		&r.user.PeriodToken, &r.periodStartedAt, &r.nextResetAt, &r.lastResetAt, &r.user.SubscriptionVersion,
 		&r.user.TrafficUsedBytes, &r.trafficUpdatedAt,
 	}
 }
@@ -637,6 +637,16 @@ func (s *Store) mutateProxyUser(ctx context.Context, id string, expectedUpdatedA
 		}
 	}
 	return tx.Commit()
+}
+
+// RotateProxyUserSubscription revokes the current subscription URL. Nothing
+// changes on the nodes, so updated_at is kept and open edits stay valid.
+func (s *Store) RotateProxyUserSubscription(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, "UPDATE proxy_users SET subscription_version = subscription_version + 1 WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("rotate proxy user subscription: %w", err)
+	}
+	return requireAffected(result)
 }
 
 func (s *Store) DeleteProxyUser(ctx context.Context, id string, expectedUpdatedAt time.Time, job NewJob) error {

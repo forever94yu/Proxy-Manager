@@ -6,6 +6,7 @@ import type {
   ProxyUser,
   ProxyUserCredentials,
   ProxyUserInput,
+  ProxyUserSubscription,
   Server,
   ServerInput,
   UserMutationResult,
@@ -223,6 +224,17 @@ function randomPassword(): string {
 
 /** Current password per demo user; seeded users get one lazily on first reveal. */
 const demoPasswords = new Map<string, string>()
+/** Subscription token per demo user, created lazily like passwords. */
+const demoSubscriptions = new Map<string, string>()
+
+function demoSubscription(userId: string, reset = false): ProxyUserSubscription {
+  let token = demoSubscriptions.get(userId)
+  if (!token || reset) {
+    token = randomPassword() + randomPassword()
+    demoSubscriptions.set(userId, token)
+  }
+  return { path: `/sub/${token}` }
+}
 
 /** Applies a password mode like the server and returns the generated password, if any. */
 function storeDemoPassword(userId: string, input: ProxyUserInput): string | undefined {
@@ -494,6 +506,13 @@ export async function demoRequest<T>(path: string, method: string, body?: unknow
     return clone({ id: user.id, username: user.username, password } satisfies ProxyUserCredentials) as T
   }
 
+  const subscriptionMatch = pathname.match(/^\/users\/([^/]+)\/subscription(\/reset)?$/)
+  if (subscriptionMatch && method === (subscriptionMatch[2] ? 'POST' : 'GET')) {
+    const user = users.find((item) => item.id === decodeURIComponent(subscriptionMatch[1]))
+    if (!user) throw new DemoApiError(404, '代理用户不存在')
+    return clone(demoSubscription(user.id, Boolean(subscriptionMatch[2]))) as T
+  }
+
   const userMatch = pathname.match(/^\/users\/([^/]+)$/)
   if (userMatch) {
     const id = decodeURIComponent(userMatch[1])
@@ -524,6 +543,7 @@ export async function demoRequest<T>(path: string, method: string, body?: unknow
       const user = users[index]
       users = users.filter((item) => item.id !== id)
       demoPasswords.delete(id)
+      demoSubscriptions.delete(id)
       const result: UserMutationResult = {
         job: createJob('user_delete', user.serverCount || 0, `正在从目标服务器移除 ${user.username}`),
       }

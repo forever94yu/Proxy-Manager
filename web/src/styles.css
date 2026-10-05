@@ -2074,9 +2074,146 @@ svg {
   font-size: 13px;
 }
 
+/* QR import */
+
+.qr-import {
+  padding: 14px 16px 16px;
+  border-radius: var(--radius-panel);
+  background: var(--surface-sunken);
+}
+
+.qr-import-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.qr-import-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+}
+
+.qr-import-controls .filter-select {
+  min-width: 168px;
+  background-color: var(--surface);
+  box-shadow: inset 0 0 0 0.5px var(--separator);
+}
+
+.qr-import-body {
+  display: grid;
+  grid-template-columns: 184px minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
+}
+
+.qr-frame {
+  display: flex;
+  aspect-ratio: 1;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: inset 0 0 0 0.5px var(--separator);
+}
+
+.qr-code {
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: #000000;
+}
+
+.qr-skeleton {
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius-small);
+}
+
+.qr-placeholder {
+  color: var(--label-secondary);
+  font-size: 12px;
+  text-align: center;
+}
+
+.qr-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  color: var(--red-text);
+}
+
+.qr-import-details {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.qr-scan-hint {
+  font-size: 13px;
+}
+
+.qr-node-summary {
+  color: var(--label-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.qr-import-details .secret-field {
+  background: var(--surface);
+}
+
+.qr-reset {
+  align-self: flex-start;
+  gap: 4px;
+}
+
+.qr-reset-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-field);
+  background: var(--orange-soft);
+  font-size: 12px;
+}
+
+.qr-reset-confirm span {
+  flex-basis: 100%;
+  color: var(--orange-text);
+}
+
+.qr-reset-confirm .text-button {
+  gap: 4px;
+}
+
 @media (max-width: 520px) {
   .credential-grid {
     grid-template-columns: 1fr;
+  }
+
+  .qr-import-body {
+    grid-template-columns: 1fr;
+  }
+
+  .qr-frame {
+    width: min(100%, 240px);
+    margin: 0 auto;
+  }
+
+  .qr-import-controls .field {
+    flex: 1;
+  }
+
+  .qr-import-controls .filter-select {
+    width: 100%;
+    min-width: 0;
   }
 }
 

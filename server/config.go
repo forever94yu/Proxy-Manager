@@ -42,8 +42,11 @@ type Config struct {
 	TrafficReconcileInterval time.Duration
 	ScriptPath               string
 	StaticDir                string
-	AllowedOrigins           map[string]struct{}
-	TrustedProxyCIDRs        []*net.IPNet
+	// PublicURL is the origin proxy clients use to reach the console, used to
+	// build subscription URLs. Empty means derive it from each request.
+	PublicURL         string
+	AllowedOrigins    map[string]struct{}
+	TrustedProxyCIDRs []*net.IPNet
 }
 
 func LoadConfig() (Config, error) {
@@ -152,6 +155,10 @@ func LoadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	publicURL, err := parsePublicURL(os.Getenv("PUBLIC_URL"))
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		Environment:              environment,
@@ -172,6 +179,7 @@ func LoadConfig() (Config, error) {
 		TrafficReconcileInterval: trafficReconcileInterval,
 		ScriptPath:               scriptPath,
 		StaticDir:                staticDir,
+		PublicURL:                publicURL,
 		AllowedOrigins:           parseOrigins(originsValue),
 		TrustedProxyCIDRs:        trustedProxyCIDRs,
 	}, nil
@@ -247,6 +255,21 @@ func parseOrigins(raw string) map[string]struct{} {
 		}
 	}
 	return origins
+}
+
+// parsePublicURL accepts an http(s) origin such as https://pm.example.com.
+// The console is always served from the root path, so a path is rejected.
+func parsePublicURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" ||
+		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || strings.Trim(parsed.Path, "/") != "" {
+		return "", errors.New("PUBLIC_URL must be an http(s) origin such as https://pm.example.com")
+	}
+	return parsed.Scheme + "://" + parsed.Host, nil
 }
 
 func parseCIDRs(raw string) ([]*net.IPNet, error) {

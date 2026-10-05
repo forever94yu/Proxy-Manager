@@ -18,6 +18,11 @@ export default defineConfig({
         target: process.env.VITE_DEV_API_TARGET || 'http://127.0.0.1:8080',
         changeOrigin: true,
       },
+      // Subscription URLs, fetched by proxy clients without a session.
+      '/sub/': {
+        target: process.env.VITE_DEV_API_TARGET || 'http://127.0.0.1:8080',
+        changeOrigin: true,
+      },
     },
   },
 })

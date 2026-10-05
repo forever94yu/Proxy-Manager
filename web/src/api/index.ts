@@ -10,6 +10,7 @@ import type {
   ProxyUser,
   ProxyUserCredentials,
   ProxyUserInput,
+  ProxyUserSubscription,
   Server,
   ServerInput,
   ServerMutationResult,
@@ -115,6 +116,13 @@ export const usersApi = {
   /** Reveals the current password so connection details can be viewed and copied again. */
   credentials(id: string): Promise<ProxyUserCredentials> {
     return apiRequest(`/users/${encodeURIComponent(id)}/credentials`)
+  },
+  subscription(id: string): Promise<ProxyUserSubscription> {
+    return apiRequest(`/users/${encodeURIComponent(id)}/subscription`)
+  },
+  /** Revokes the current subscription URL and returns a new one. */
+  resetSubscription(id: string): Promise<ProxyUserSubscription> {
+    return apiRequest(`/users/${encodeURIComponent(id)}/subscription/reset`, { method: 'POST', body: {} })
   },
 }
 
