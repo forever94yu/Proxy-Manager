@@ -39,7 +39,8 @@ Other useful settings are `HTTP_ADDR`, `DB_PATH`, `ADMIN_USERNAME`,
 `SESSION_TTL`, `COOKIE_SECURE`, `WORKER_CONCURRENCY`, `WORKER_POLL_INTERVAL`,
 `SSH_TIMEOUT`, `COMMAND_TIMEOUT`, `TRAFFIC_SYNC_INTERVAL` (default `5m`),
 `TRAFFIC_RECONCILE_INTERVAL` (default `30s`), `INSTALL_SCRIPT_PATH`, `STATIC_DIR`,
-`PUBLIC_URL` (origin used in subscription URLs, e.g. `https://pm.example.com`), and
+`PUBLIC_URL` (origin used in subscription URLs, e.g. `https://pm.example.com`),
+`UPDATE_ENABLED`, `UPDATE_REPO` and `UPDATE_DIR` (online upgrades, see below), and
 `CORS_ORIGINS` (comma-separated exact origins). `TRUSTED_PROXY_CIDRS` accepts a
 comma-separated set of reverse-proxy addresses or CIDRs; only those peers may
 supply `X-Forwarded-For` for login rate limiting or `X-Forwarded-Proto` for
@@ -79,3 +80,17 @@ jobs always apply the latest settings.
 
 When the script does not expose that contract, SSH jobs fail explicitly after
 upload instead of trying to drive its interactive menu.
+
+## Online upgrades
+
+`GET /api/v1/system/update` reports the running version (`proxy-manager version`
+prints it) and the latest release of `UPDATE_REPO` on GitHub.
+`POST /api/v1/system/update` with `{"version": "x.y.z"}` downloads the archive for
+the running platform, verifies it against `SHA256SUMS.txt` and the GitHub asset
+digest, checks that its program runs, backs up the database with `VACUUM INTO`
+and installs it under `UPDATE_DIR` (default: `releases/` next to the database).
+The server then shuts down gracefully and starts the new release as a child
+process; from then on the original program acts as a launcher. A release that
+exits before it has migrated the database and bound its port is rolled back
+automatically. Online upgrades are enabled by default only when
+`APP_ENV=production`. Release archives are built with `npm run release`.

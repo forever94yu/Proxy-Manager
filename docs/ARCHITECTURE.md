@@ -191,6 +191,9 @@ POST   /users/{id}/state            {"enabled": true|false}
 GET    /jobs
 GET    /jobs/{id}
 POST   /jobs/{id}/retry
+
+GET    /system/update?refresh=1     当前版本、GitHub 最新版本和升级进度
+POST   /system/update               {"version": "x.y.z"}，下载、安装并重启到最新版本
 ```
 
 两个 `servers/actions/*` 接口接收服务器 ID 列表并创建真正的批量任务；`GET /jobs/{id}` 返回任务及其逐服务器 target，包含状态、尝试次数、时间与脱敏后的错误。失败重试只重新排队仍然有效的失败 target。
@@ -300,3 +303,41 @@ CAP_MB = ceil((额度 - 其他服务器上本周期已用) / 1 MiB)，至少为 
 返回格式按 `?format=clash|base64` 指定，否则按 User-Agent 判断：Clash、mihomo、Stash、Shadowrocket 和 NekoBox 得到完整的 Clash 配置（节点、一个“节点选择”策略组和 `MATCH` 规则）；其他客户端（v2rayN、v2rayNG、Hiddify 等）得到 Base64 编码的分享链接列表。订阅中的节点按服务器名称排序，被停用或到期的账号仍会返回节点，由节点拒绝认证，客户端可以通过 `Subscription-Userinfo` 看到额度和到期状态。
 
 订阅地址的域名取自 `PUBLIC_URL`；未配置时由浏览器用当前访问控制台的地址拼接。Shadowrocket 首页扫码不会把普通订阅地址识别为订阅，因此它的订阅二维码包装为 `shadowrocket://add/sub/<标准 Base64 地址>?remark=用户名`。
+
+## 11. 在线升级
+
+控制面可以从 GitHub Releases 升级自己，不需要登录服务器替换文件。代码在 `server/updater.go`（检查、下载、安装）和 `server/launcher.go`（启动已安装的版本与回滚）。
+
+### 检查
+
+- `GET /api/v1/system/update` 读取 `UPDATE_REPO`（默认 `forever94yu/Proxy-Manager`）的 `releases/latest`，草稿和预发布版本不会出现在这个接口里。结果缓存 1 小时，`?refresh=1` 强制重新检查（10 秒内的重复请求复用上一次结果）。GitHub 匿名 API 每小时限 60 次。
+- 当前版本是编译进程序的 `Version`（`server/version.go`），与 `package.json` 的版本号保持一致，由单元测试保证。
+- 安装包按 `proxy-manager_v<版本>_<GOOS>_<GOARCH>.tar.gz`（Windows 为 `.zip`）匹配当前平台，结构见 `scripts/release.mjs`。
+
+### 安装
+
+`POST /api/v1/system/update {"version": "x.y.z"}` 只接受最近一次检查到的最新版本，并且要求当前没有执行中的任务。之后在后台依次：
+
+1. 下载 `SHA256SUMS.txt`，与 GitHub 为资产记录的 `digest` 交叉核对，再流式下载安装包并校验 SHA-256。安装包上限 200 MiB，解压后上限 400 MiB。
+2. 解压到 `releases/` 下的临时目录。只接受位于 `proxy-manager_v<版本>_<平台>/` 下的普通文件和目录：路径包含 `..` 或是绝对路径时拒绝安装，符号链接等特殊文件被忽略。
+3. 检查程序、`web/index.html` 和 `3proxy-install.sh` 都存在，并运行 `proxy-manager version`，输出必须等于目标版本，以确认程序能在这台机器上运行。
+4. 用 `VACUUM INTO` 把数据库一致地备份到 `releases/backups/`，保留最近 3 份。
+5. 把临时目录改名为 `releases/v<版本>/`，写入 `releases/state.json`（`current`、`previous`、`pending: true`），删除其他旧版本目录。
+6. 等待执行中的任务结束（最多 2 分钟），然后优雅退出 HTTP 服务、worker 和流量循环，重启到新版本。
+
+`releases/` 默认位于数据库所在目录，可以用 `UPDATE_DIR` 修改，必须对服务用户可写。只有生产环境默认开启在线升级，`UPDATE_ENABLED` 可以显式开关。
+
+### 启动与回滚
+
+原始程序（Docker 镜像中的 `/app/proxy-manager`、systemd 的 `ExecStart`）启动时先读取 `state.json`。如果其中的 `current` 比自身版本新，并且对应目录下有程序，就作为**启动器**把它作为子进程运行：传入相同的参数和环境变量，加上 `PM_RELEASE_DIR`（新版本从这里读取 `web/` 和 `3proxy-install.sh`，覆盖 `STATIC_DIR`、`INSTALL_SCRIPT_PATH`）和 `PM_LAUNCHED`，并把 SIGTERM/SIGINT 转发给子进程。
+
+- 新版本完成数据库迁移并监听端口后，把 `pending` 清除，表示启动成功。
+- 子进程以退出码 75 退出表示又安装了新版本，启动器重新读取 `state.json` 并启动它。不是由启动器启动的进程（即原始程序自己完成了升级）则在进程内完成同样的切换。
+- 如果子进程在 `pending` 状态下退出，说明新版本没能启动。启动器把 `current` 改回 `previous`（为空时表示原始程序），在 `failedVersion` 中记录失败的版本，然后启动旧版本。控制台会提示“已自动回滚”。
+- 原始程序本身比 `state.json` 中的版本新时（例如用 `docker compose up --build` 升级了镜像），直接运行原始程序，已安装的旧版本不再使用。
+
+回滚只覆盖“新版本启动失败”。新版本启动成功后，数据库已经按新版本迁移，回到旧版本需要用 `releases/backups/` 中的备份手动恢复。
+
+### Docker
+
+容器内的升级保存在数据卷的 `/data/releases/` 中，因此在重启和重建容器后仍然有效。容器的主进程是启动器，升级时不会退出，`restart: unless-stopped` 不需要参与。之后用新镜像重建容器时，镜像里的程序版本更新，会自动接管。

@@ -39,6 +39,7 @@ Proxy Manager 是一个 [3proxy](https://github.com/3proxy/3proxy) 多服务器�
 | 流量与期限 | 按账号设置流量额度（所有服务器合计，上行加下行）、到期时间，以及按日、周、月自动重置流量；支持手动重置、启用和停用；超额或到期后账号会在节点上自动停用并断开连接 |
 | 任务记录 | 所有远程操作都会生成后台任务，逐台服务器记录执行结果和错误信息；部分服务器失败时，可以只重试失败的那几台 |
 | 安全 | 控制台使用 HttpOnly 会话 Cookie 并限制登录尝试次数；SSH 凭据和代理密码用 AES-256-GCM 加密后才写入数据库；首次连接时记录 SSH 主机指纹，后续连接必须一致 |
+| 在线升级 | 在 **系统更新** 页面检查 GitHub 上的新版本、查看更新说明，一键下载并重启到新版本；安装包经过 SHA-256 校验，升级前自动备份数据库，新版本启动失败时自动回滚 |
 
 ## 界面预览
 
@@ -55,6 +56,10 @@ Proxy Manager 是一个 [3proxy](https://github.com/3proxy/3proxy) 多服务器�
 **任务记录**：每个远程操作的进度、成功和失败数量。
 
 ![任务记录](docs/images/jobs.png)
+
+**系统更新**：当前版本、GitHub 上的最新版本和更新说明，点击按钮即可在线升级。
+
+![系统更新](docs/images/update.png)
 
 <table>
   <tr>
@@ -533,12 +538,31 @@ curl -x socks5h://alice:PASSWORD@203.0.113.10:1080 https://api.ipify.org
 | `COMMAND_TIMEOUT` | `15m` | 单个远程操作的超时时间；如果节点下载源码或编译很慢，可以适当调大 |
 | `TRAFFIC_SYNC_INTERVAL` | `5m` | 流量采集间隔，最小 `30s` |
 | `TRAFFIC_RECONCILE_INTERVAL` | `30s` | 检查到期、额度用尽和周期重置的间隔，最小 `5s` |
+| `UPDATE_ENABLED` | 生产环境为 `true`，其他为 `false` | 是否允许在控制台在线升级 |
+| `UPDATE_REPO` | `forever94yu/Proxy-Manager` | 检查新版本的 GitHub 仓库，格式为 `owner/name` |
+| `UPDATE_DIR` | 数据库所在目录下的 `releases/`（Docker 中为 `/data/releases`） | 在线升级安装的新版本和升级前的数据库备份，服务用户必须可写 |
 
 时间类配置使用 Go duration 格式，例如 `30s`、`5m`、`1h30m`。
 
 ## 升级与备份
 
-**升级（Docker）**
+**在线升级（推荐）**
+
+进入控制台的 **系统更新** 页面，可以看到当前版本和 GitHub 上的最新版本。有新版本时，侧边栏会显示红点，点击 **升级到 vX.Y.Z** 并确认即可。控制台会依次：
+
+1. 下载适用于当前平台的安装包，用发布页的 `SHA256SUMS.txt` 校验；
+2. 检查新程序能在这台机器上运行，并备份数据库到 `releases/backups/`（保留最近 3 份）；
+3. 等待正在执行的任务结束，然后重启到新版本，页面自动刷新。
+
+重启期间控制台会中断几秒到几十秒，代理节点和代理连接不受影响。如果新版本没能启动，会自动回滚到原来的版本，并在 **系统更新** 页面提示。
+
+- 控制面主机需要能访问 `api.github.com` 和 `github.com`。如果需要通过代理访问，可以在 `.env` 中设置 `HTTPS_PROXY`。
+- 新版本保存在数据目录的 `releases/` 下（Docker 为数据卷中的 `/data/releases`），重启或重建容器后依然生效。之后如果用 `docker compose up -d --build` 升级到更新的镜像，镜像里的程序会自动接管。
+- systemd 部署时，`releases/` 位于 `/var/lib/proxy-manager/`（由 `StateDirectory` 创建，服务用户可写），不需要修改 `/opt/proxy-manager` 的权限。
+- 新版本启动成功后，数据库已经按新版本迁移。如需退回旧版本，请停止服务后用 `releases/backups/` 中的备份恢复数据库，再删除 `releases/state.json`。
+- 不想在控制台升级时，设置 `UPDATE_ENABLED=false`。
+
+**手动升级（Docker）**
 
 ```bash
 cd Proxy-Manager
@@ -547,6 +571,10 @@ docker compose up -d --build
 ```
 
 数据库结构变更会在程序启动时自动迁移。升级前建议先备份。如果你改过 `compose.yaml`（例如把端口绑定到 `127.0.0.1`），`git pull` 前先执行 `git stash`，拉取后再执行 `git stash pop`。
+
+**手动升级（二进制与 systemd）**
+
+从 [Releases](https://github.com/forever94yu/Proxy-Manager/releases) 下载对应平台的压缩包，停止服务后替换 `/opt/proxy-manager/` 下的程序、`web/` 目录和 `3proxy-install.sh`，再启动服务。
 
 **备份**
 
@@ -659,6 +687,18 @@ docker compose start
 </details>
 
 <details>
+<summary><b>系统更新页面提示检查更新失败或下载失败</b></summary>
+
+- `无法连接 GitHub`：控制面主机访问不了 `api.github.com` 或 `github.com`。可以在容器或服务的环境变量中设置 `HTTPS_PROXY=http://代理地址:端口` 后重启。
+- `GitHub API 请求次数已达上限`：GitHub 对未登录的 API 请求限制为每个 IP 每小时 60 次，稍后再试即可。控制台每小时最多自动检查一次。
+- `升级目录不可写`：服务用户对 `UPDATE_DIR`（默认在数据库所在目录下）没有写权限。
+- `该版本没有提供适用于当前平台的安装包`：发布页缺少当前平台的压缩包，请按上文手动升级。
+
+升级失败不会影响正在运行的版本，处理后可以重试。
+
+</details>
+
+<details>
 <summary><b>流量数据没有更新，或服务器显示“流量采集失败”</b></summary>
 
 流量每 5 分钟采集一次，新账号需要等一个采集周期才会显示数据。只有已部署、并且已经成功连接过（记录了主机指纹）的服务器才会被采集。如果显示“流量采集失败”，请先对这台服务器执行一次测试连接，排查 SSH 连接问题。
@@ -672,6 +712,7 @@ npm run setup   # 安装依赖
 npm run dev     # 启动 API（8080）和前端（5173），前端会把 /api 请求代理到 8080
 npm run build   # 构建前端到 web/dist，构建后端到 dist/
 npm test        # 前端类型检查与构建，以及 Go 单元测试
+npm run release # 构建前端，并把 5 个平台的发布压缩包和 SHA256SUMS.txt 输出到 dist/release/
 ```
 
 - **连接真实服务器调试**：复制 `.env.example` 为 `.env`，把 `EXECUTOR_MODE` 改为 `ssh`。
@@ -685,7 +726,7 @@ server/              Go API、SQLite 存储、任务队列、SSH/SCP 执行器
   migrations/        数据库迁移脚本（编译进二进制，启动时自动执行）
 3proxy-install.sh    3proxy 安装脚本：交互菜单与 --api 非交互接口
 tests/               安装脚本的实机测试和多发行版 Docker 测试
-scripts/             本地开发与构建脚本
+scripts/             本地开发、构建与发布打包脚本
 docs/                架构文档与截图
 Dockerfile           多阶段构建的生产镜像
 compose.yaml         单实例部署编排

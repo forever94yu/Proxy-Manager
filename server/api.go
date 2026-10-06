@@ -29,6 +29,7 @@ type API struct {
 	logger        *slog.Logger
 	logins        *loginLimiter
 	subscriptions *SubscriptionSigner
+	updater       *Updater
 }
 
 type apiErrorEnvelope struct {
@@ -41,9 +42,9 @@ type apiError struct {
 	Fields  FieldErrors `json:"fields,omitempty"`
 }
 
-func NewAPI(cfg Config, store *Store, box *SecretBox, sessions *SessionManager, worker *Worker, logger *slog.Logger) *API {
+func NewAPI(cfg Config, store *Store, box *SecretBox, sessions *SessionManager, worker *Worker, updater *Updater, logger *slog.Logger) *API {
 	return &API{
-		cfg: cfg, store: store, box: box, sessions: sessions, worker: worker, logger: logger,
+		cfg: cfg, store: store, box: box, sessions: sessions, worker: worker, updater: updater, logger: logger,
 		logins:        newLoginLimiter(10, 15*time.Minute),
 		subscriptions: NewSubscriptionSigner(cfg.MasterKey),
 	}
@@ -93,6 +94,9 @@ func (a *API) Handler() http.Handler {
 	protected.HandleFunc("GET /api/v1/jobs", a.listJobs)
 	protected.HandleFunc("GET /api/v1/jobs/{id}", a.getJob)
 	protected.HandleFunc("POST /api/v1/jobs/{id}/retry", a.retryJob)
+
+	protected.HandleFunc("GET /api/v1/system/update", a.getUpdate)
+	protected.HandleFunc("POST /api/v1/system/update", a.startUpdate)
 
 	if handler := staticHandler(a.cfg.StaticDir); handler != nil {
 		root.Handle("/", handler)
@@ -971,6 +975,42 @@ func (a *API) retryJob(w http.ResponseWriter, r *http.Request) {
 	}
 	a.worker.Notify()
 	writeData(w, http.StatusAccepted, map[string]any{"job": job})
+}
+
+// getUpdate reports the running version and the latest GitHub release;
+// ?refresh=1 checks GitHub again instead of using the hourly cached result.
+func (a *API) getUpdate(w http.ResponseWriter, r *http.Request) {
+	refresh := r.URL.Query().Get("refresh") == "1"
+	w.Header().Set("Cache-Control", "no-store")
+	writeData(w, http.StatusOK, a.updater.Status(r.Context(), refresh))
+}
+
+// startUpdate downloads and installs the latest release in the background and
+// restarts into it. The body names the version the operator confirmed.
+func (a *API) startUpdate(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Version string `json:"version"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if normalizeVersion(input.Version) == "" {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", "Update version is invalid", FieldErrors{"version": "Version must look like 1.4.0"})
+		return
+	}
+	status, err := a.updater.Start(r.Context(), input.Version)
+	switch {
+	case err == nil:
+		a.logger.Info("update requested", "from", Version, "to", status.TargetVersion, "actor", actorFromContext(r.Context()))
+		writeData(w, http.StatusAccepted, status)
+	case errors.Is(err, ErrUpdateDisabled), errors.Is(err, ErrUpdateNoPackage):
+		writeError(w, http.StatusUnprocessableEntity, "update_unavailable", err.Error(), nil)
+	case errors.Is(err, ErrUpdateInProgress), errors.Is(err, ErrUpdateNotLatest),
+		errors.Is(err, ErrUpdateCurrent), errors.Is(err, ErrUpdateJobsActive):
+		writeError(w, http.StatusConflict, "conflict", err.Error(), nil)
+	default:
+		a.internalError(w, r, err)
+	}
 }
 
 func (a *API) enqueueSingleServerJob(ctx context.Context, server Server, jobType string, task TargetTask) (Job, error) {

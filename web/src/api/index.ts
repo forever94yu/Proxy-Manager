@@ -14,6 +14,7 @@ import type {
   Server,
   ServerInput,
   ServerMutationResult,
+  UpdateStatus,
   UserMutationResult,
 } from '@/types'
 
@@ -136,5 +137,16 @@ export const jobsApi = {
   },
   retry(id: string): Promise<JobMutationResult> {
     return apiRequest(`/jobs/${encodeURIComponent(id)}/retry`, { method: 'POST', body: {} })
+  },
+}
+
+export const systemApi = {
+  /** `refresh` checks GitHub again instead of using the hourly cached result. */
+  update(refresh = false): Promise<UpdateStatus> {
+    return apiRequest(`/system/update${refresh ? '?refresh=1' : ''}`)
+  },
+  /** Downloads, installs and restarts into `version`, which must be the latest release. */
+  startUpdate(version: string): Promise<UpdateStatus> {
+    return apiRequest('/system/update', { method: 'POST', body: { version } })
   },
 }

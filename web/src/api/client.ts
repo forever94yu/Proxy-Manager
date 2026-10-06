@@ -75,6 +75,13 @@ const MESSAGE_TRANSLATIONS: Record<string, string> = {
   'The request body exceeds 1 MiB': '提交的内容过大（超过 1 MiB）',
   'Invalid JSON request body': '请求格式错误',
   'A field has the wrong type': '字段类型错误',
+  'Online updates are disabled': '在线升级已关闭',
+  'An update is already in progress': '已有升级正在进行',
+  'The requested version is not the latest release; check for updates again': '该版本不是最新版本，请重新检查更新',
+  'Proxy Manager is already running the latest version': '当前已是最新版本',
+  'The release has no package for this platform': '该版本没有提供适用于当前平台的安装包',
+  'Jobs are running; wait for them to finish before updating': '有任务正在执行，请等待完成后再升级',
+  'Update version is invalid': '升级版本号无效',
 }
 
 const FIELD_TRANSLATIONS: Record<string, string> = {
@@ -111,6 +118,7 @@ const FIELD_TRANSLATIONS: Record<string, string> = {
   'Invalid sync status': '同步状态无效',
   'Enabled must be true or false': '启用状态无效',
   'Type is too long': '类型过长',
+  'Version must look like 1.4.0': '版本号格式应为 1.4.0',
 }
 
 export function translateMessage(message: string): string {

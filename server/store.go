@@ -1411,3 +1411,17 @@ func boolInt(value bool) int {
 	}
 	return 0
 }
+
+// CountRunningJobs returns the number of job targets currently executing.
+func (s *Store) CountRunningJobs(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM job_targets WHERE status = 'running'").Scan(&count)
+	return count, err
+}
+
+// Backup writes a consistent copy of the database to path, which must not
+// exist yet.
+func (s *Store) Backup(ctx context.Context, path string) error {
+	_, err := s.db.ExecContext(ctx, "VACUUM INTO ?", path)
+	return err
+}

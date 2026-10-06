@@ -9,6 +9,7 @@ import type {
   ProxyUserSubscription,
   Server,
   ServerInput,
+  UpdateStatus,
   UserMutationResult,
 } from '@/types'
 
@@ -279,6 +280,59 @@ export class DemoApiError extends Error {
     super(message)
     this.status = status
   }
+}
+
+// The demo pretends a newer release exists; installing it walks through the
+// phases and then "restarts" into it.
+const demoUpdate: UpdateStatus = {
+  currentVersion: '1.3.0',
+  platform: 'linux/amd64',
+  enabled: true,
+  repository: 'forever94yu/Proxy-Manager',
+  latest: {
+    version: '1.4.0',
+    name: 'Proxy Manager v1.4.0',
+    notes: [
+      '## Proxy Manager v1.4.0',
+      '',
+      '### 新功能',
+      '',
+      '- **在线升级**：在“系统更新”页面检查 GitHub 上的新版本，一键下载、校验并重启到新版本。',
+      '- 升级前自动备份数据库；新版本启动失败时自动回滚。',
+      '',
+      '### 从 v1.3.0 升级',
+      '',
+      '- 替换程序和 `web/` 目录后重启即可。',
+    ].join('\n'),
+    url: 'https://github.com/forever94yu/Proxy-Manager/releases/tag/v1.4.0',
+    publishedAt: minutesAgo(60 * 26),
+    packageName: 'proxy-manager_v1.4.0_linux_amd64.tar.gz',
+    packageSize: 5_120_000,
+  },
+  updateAvailable: true,
+  checkedAt: minutesAgo(3),
+  phase: 'idle',
+}
+let demoUpdateStartedAt = 0
+
+function demoUpdateStatus(): UpdateStatus {
+  if (demoUpdateStartedAt) {
+    const elapsed = Date.now() - demoUpdateStartedAt
+    const total = demoUpdate.latest?.packageSize || 1
+    if (elapsed < 4_000) {
+      Object.assign(demoUpdate, { phase: 'downloading', downloadedBytes: Math.round(total * elapsed / 4_000), totalBytes: total })
+    } else if (elapsed < 6_000) {
+      Object.assign(demoUpdate, { phase: 'installing', downloadedBytes: total, totalBytes: total })
+    } else if (elapsed < 9_000) {
+      Object.assign(demoUpdate, { phase: 'restarting', downloadedBytes: undefined, totalBytes: undefined })
+    } else {
+      demoUpdateStartedAt = 0
+      Object.assign(demoUpdate, {
+        phase: 'idle', currentVersion: demoUpdate.latest?.version, updateAvailable: false, targetVersion: undefined,
+      })
+    }
+  }
+  return demoUpdate
 }
 
 export async function demoRequest<T>(path: string, method: string, body?: unknown): Promise<T> {
@@ -571,6 +625,20 @@ export async function demoRequest<T>(path: string, method: string, body?: unknow
     if (!source) throw new DemoApiError(404, '任务不存在')
     const job = createJob(source.type, source.failedCount || source.targetCount || 1, `重试任务 ${source.id}`)
     return clone({ job } satisfies JobMutationResult) as T
+  }
+
+  if (pathname === '/system/update' && method === 'GET') {
+    if (url.searchParams.get('refresh') === '1' && !demoUpdateStartedAt) demoUpdate.checkedAt = new Date().toISOString()
+    return clone(demoUpdateStatus()) as T
+  }
+
+  if (pathname === '/system/update' && method === 'POST') {
+    const { version } = body as { version?: string }
+    if (!demoUpdate.updateAvailable || version !== demoUpdate.latest?.version) throw new DemoApiError(409, '该版本不是最新版本，请重新检查更新')
+    if (demoUpdateStartedAt) throw new DemoApiError(409, '已有升级正在进行')
+    demoUpdateStartedAt = Date.now()
+    demoUpdate.targetVersion = version
+    return clone(demoUpdateStatus()) as T
   }
 
   throw new DemoApiError(404, `演示接口不存在：${method} ${pathname}`)

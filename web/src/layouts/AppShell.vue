@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import {
+  CircleArrowUp,
   LayoutDashboard,
   ListChecks,
   LogOut,
@@ -12,6 +13,7 @@ import {
   X,
 } from 'lucide-vue-next'
 
+import { systemApi } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { useToastStore } from '@/stores/toast'
 import { operatorInitials } from '@/utils'
@@ -23,12 +25,15 @@ const toast = useToastStore()
 const mobileOpen = ref(false)
 const loggingOut = ref(false)
 const scrolled = ref(false)
+const currentVersion = ref('')
+const updateAvailable = ref(false)
 
 const navItems = [
   { to: '/dashboard', label: '运行概览', icon: LayoutDashboard },
   { to: '/servers', label: '服务器', icon: Server },
   { to: '/users', label: '代理用户', icon: UsersRound },
   { to: '/jobs', label: '任务记录', icon: ListChecks },
+  { to: '/update', label: '系统更新', icon: CircleArrowUp },
 ]
 
 const pageTitle = computed(() => typeof route.meta.title === 'string' ? route.meta.title : '控制台')
@@ -58,7 +63,19 @@ async function logout(): Promise<void> {
   }
 }
 
+// The server caches the GitHub check for an hour, so this is cheap.
+async function loadVersion(): Promise<void> {
+  try {
+    const status = await systemApi.update()
+    currentVersion.value = status.currentVersion
+    updateAvailable.value = status.enabled && status.updateAvailable
+  } catch {
+    // The version badge is informational only.
+  }
+}
+
 onMounted(() => {
+  loadVersion()
   window.addEventListener('keydown', handleKeydown)
   window.addEventListener('scroll', handleScroll, { passive: true })
   handleScroll()
@@ -86,10 +103,14 @@ onBeforeUnmount(() => {
         <RouterLink v-for="item in navItems" :key="item.to" :to="item.to" class="nav-item">
           <component :is="item.icon" :size="18" />
           <span>{{ item.label }}</span>
+          <i v-if="item.to === '/update' && updateAvailable" class="nav-dot" title="有新版本可用" />
         </RouterLink>
       </nav>
 
       <div class="sidebar-footer">
+        <RouterLink v-if="currentVersion" to="/update" class="version-tag" :title="updateAvailable ? '有新版本可用' : '当前版本'">
+          v{{ currentVersion }}<span v-if="updateAvailable">· 可升级</span>
+        </RouterLink>
         <div class="operator-block">
           <span class="operator-avatar" aria-hidden="true">{{ operatorInitials(auth.operator?.name || '') }}</span>
           <div class="operator-copy">

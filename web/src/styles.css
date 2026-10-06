@@ -2896,3 +2896,244 @@ svg {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ───────────────────────── System update ───────────────────────── */
+
+.nav-dot {
+  width: 8px;
+  height: 8px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--red);
+}
+
+.version-tag {
+  display: inline-flex;
+  gap: 4px;
+  margin: 0 0 6px 10px;
+  color: var(--label-tertiary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.version-tag span {
+  color: var(--blue);
+  font-weight: 500;
+}
+
+.update-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 22px;
+}
+
+.update-hero {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.update-icon {
+  display: inline-flex;
+  width: 52px;
+  height: 52px;
+  flex: 0 0 52px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 16px;
+  background: var(--green-soft);
+  color: var(--green-text);
+}
+
+.update-icon.available {
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.update-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.update-copy h3 {
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+}
+
+.update-copy p {
+  color: var(--label-secondary);
+  font-size: 13px;
+}
+
+.update-copy strong {
+  color: var(--label);
+  font-weight: 600;
+}
+
+.update-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: var(--surface-sunken);
+}
+
+.update-progress-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.update-progress p {
+  color: var(--label-secondary);
+  font-size: 12px;
+}
+
+.update-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius-field);
+  font-size: 13px;
+}
+
+.update-alert svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.update-alert span {
+  color: var(--label);
+}
+
+.update-alert.danger { background: var(--red-soft); color: var(--red-text); }
+.update-alert.warning { background: var(--orange-soft); color: var(--orange-text); }
+.update-alert.info { background: var(--blue-soft); color: var(--blue); }
+
+.update-alert code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+}
+
+.update-notes-panel .panel-heading {
+  padding: 18px 22px 0;
+}
+
+.release-notes {
+  max-height: 520px;
+  padding: 6px 22px 22px;
+  overflow: auto;
+  color: var(--label);
+  font-size: 13px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.release-notes > :first-child {
+  margin-top: 0;
+}
+
+.release-notes h3,
+.release-notes h4,
+.release-notes h5,
+.release-notes h6 {
+  margin: 16px 0 6px;
+  font-weight: 650;
+}
+
+.release-notes h3 { font-size: 16px; }
+.release-notes h4 { font-size: 14px; }
+.release-notes h5,
+.release-notes h6 { font-size: 13px; }
+
+.release-notes p,
+.release-notes ul,
+.release-notes pre,
+.release-notes-table {
+  margin: 6px 0;
+}
+
+.release-notes ul {
+  padding-left: 20px;
+}
+
+.release-notes li + li {
+  margin-top: 3px;
+}
+
+.release-notes code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--fill-soft);
+  font-family: "SF Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+}
+
+.release-notes pre {
+  padding: 12px 14px;
+  overflow-x: auto;
+  border-radius: var(--radius-field);
+  background: var(--surface-sunken);
+}
+
+.release-notes pre code {
+  padding: 0;
+  background: none;
+  white-space: pre;
+}
+
+.release-notes a {
+  color: var(--blue);
+}
+
+.release-notes-table {
+  overflow-x: auto;
+}
+
+.release-notes-table table {
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.release-notes-table th,
+.release-notes-table td {
+  padding: 6px 12px;
+  border: 0.5px solid var(--separator-strong);
+  text-align: left;
+  vertical-align: top;
+}
+
+.release-notes-table th {
+  background: var(--surface-sunken);
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .update-hero {
+    flex-wrap: wrap;
+  }
+
+  .update-hero .button {
+    width: 100%;
+  }
+
+  .update-details {
+    grid-template-columns: 1fr;
+  }
+
+  .update-details > div:nth-child(odd) {
+    border-right: 0;
+  }
+
+  .update-details > div:nth-last-child(2) {
+    border-bottom: 0.5px solid var(--separator);
+  }
+}

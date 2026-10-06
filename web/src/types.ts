@@ -215,3 +215,37 @@ export interface ListResponse<T> {
   items: T[]
   total?: number
 }
+
+export interface ReleaseInfo {
+  version: string
+  name: string
+  /** Release notes (Markdown source). */
+  notes: string
+  url: string
+  publishedAt: string
+  /** Archive for the server's platform; absent when the release has none. */
+  packageName?: string
+  packageSize?: number
+}
+
+export type UpdatePhase = 'idle' | 'downloading' | 'installing' | 'restarting' | 'failed'
+
+export interface UpdateStatus {
+  currentVersion: string
+  /** GOOS/GOARCH of the control plane, e.g. linux/amd64. */
+  platform: string
+  /** False when UPDATE_ENABLED=false or the server has no releases directory. */
+  enabled: boolean
+  repository: string
+  latest?: ReleaseInfo
+  updateAvailable: boolean
+  checkedAt?: string
+  checkError?: string
+  phase: UpdatePhase
+  targetVersion?: string
+  downloadedBytes?: number
+  totalBytes?: number
+  error?: string
+  /** A release that failed to start after an upgrade and was rolled back. */
+  failedVersion?: string
+}

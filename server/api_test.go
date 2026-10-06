@@ -89,7 +89,7 @@ func newTestApplication(t *testing.T, executor Executor) *testApplication {
 		t.Fatalf("worker.Start: %v", err)
 	}
 	sessions := NewSessionManager(cfg)
-	api := NewAPI(cfg, store, box, sessions, worker, logger)
+	api := NewAPI(cfg, store, box, sessions, worker, NewUpdater(cfg, store, logger), logger)
 	testServer := httptest.NewServer(api.Handler())
 	jar, err := cookiejar.New(nil)
 	if err != nil {

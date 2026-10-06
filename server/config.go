@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -18,7 +19,10 @@ const (
 	developmentAdminPassword = "ProxyManager!2026"
 	developmentSessionSecret = "proxy-manager-development-session-secret-change-me"
 	developmentMasterKey     = "proxy-manager-development-master-key-change-me"
+	defaultUpdateRepository  = "forever94yu/Proxy-Manager"
 )
+
+var repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$`)
 
 type Config struct {
 	Environment       string
@@ -47,6 +51,11 @@ type Config struct {
 	PublicURL         string
 	AllowedOrigins    map[string]struct{}
 	TrustedProxyCIDRs []*net.IPNet
+	// UpdateRepository is the GitHub owner/name whose releases are offered as
+	// online upgrades. UpdateDir holds installed releases and the database
+	// backups taken before each upgrade; empty disables online upgrades.
+	UpdateRepository string
+	UpdateDir        string
 }
 
 func LoadConfig() (Config, error) {
@@ -110,6 +119,20 @@ func LoadConfig() (Config, error) {
 	staticDir, err = filepath.Abs(staticDir)
 	if err != nil {
 		return Config{}, fmt.Errorf("resolve STATIC_DIR: %w", err)
+	}
+	if releaseDir := os.Getenv(releaseDirEnv); releaseDir != "" {
+		// A release installed by an online upgrade serves its own console and
+		// node installer, whatever the original installation configured.
+		staticDir = filepath.Join(releaseDir, "web")
+		scriptPath = filepath.Join(releaseDir, "3proxy-install.sh")
+	}
+	updateRepository := envOrDefault("UPDATE_REPO", defaultUpdateRepository)
+	if !repositoryPattern.MatchString(updateRepository) {
+		return Config{}, errors.New("UPDATE_REPO must be a GitHub repository such as owner/name")
+	}
+	updateDir, err := updateDirFromEnv()
+	if err != nil {
+		return Config{}, err
 	}
 
 	executorMode := strings.ToLower(envOrDefault("EXECUTOR_MODE", "mock"))
@@ -182,7 +205,32 @@ func LoadConfig() (Config, error) {
 		PublicURL:                publicURL,
 		AllowedOrigins:           parseOrigins(originsValue),
 		TrustedProxyCIDRs:        trustedProxyCIDRs,
+		UpdateRepository:         updateRepository,
+		UpdateDir:                updateDir,
 	}, nil
+}
+
+// updateDirFromEnv resolves the releases directory used by online upgrades:
+// UPDATE_DIR, or a releases directory next to the database. It is empty when
+// online upgrades are disabled (UPDATE_ENABLED, on by default in production
+// only, so a development build never hands over to an installed release) or
+// the database is in memory. The launcher needs it before the rest of the
+// configuration is loaded.
+func updateDirFromEnv() (string, error) {
+	databasePath := envOrDefault("DB_PATH", filepath.Join("data", "proxy-manager.db"))
+	production := strings.EqualFold(envOrDefault("APP_ENV", "development"), "production")
+	if !envBool("UPDATE_ENABLED", production) || databasePath == ":memory:" {
+		return "", nil
+	}
+	databasePath, err := filepath.Abs(databasePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve DB_PATH: %w", err)
+	}
+	updateDir, err := filepath.Abs(envOrDefault("UPDATE_DIR", filepath.Join(filepath.Dir(databasePath), "releases")))
+	if err != nil {
+		return "", fmt.Errorf("resolve UPDATE_DIR: %w", err)
+	}
+	return updateDir, nil
 }
 
 func parseMasterKey(value string) ([]byte, error) {

@@ -5,6 +5,7 @@ import DashboardPage from '@/pages/DashboardPage.vue'
 import JobsPage from '@/pages/JobsPage.vue'
 import LoginPage from '@/pages/LoginPage.vue'
 import ServersPage from '@/pages/ServersPage.vue'
+import UpdatePage from '@/pages/UpdatePage.vue'
 import UsersPage from '@/pages/UsersPage.vue'
 import { useAuthStore } from '@/stores/auth'
 import { pinia } from '@/stores'
@@ -27,6 +28,7 @@ export const router = createRouter({
         { path: 'servers', name: 'servers', component: ServersPage, meta: { title: '服务器' } },
         { path: 'users', name: 'users', component: UsersPage, meta: { title: '代理用户' } },
         { path: 'jobs', name: 'jobs', component: JobsPage, meta: { title: '任务记录' } },
+        { path: 'update', name: 'update', component: UpdatePage, meta: { title: '系统更新' } },
       ],
     },
     { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
